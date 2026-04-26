@@ -44,25 +44,51 @@
 
 ### 1.1 安装
 
-安装使用 `大愚 Agent` 前需安装Python 3.11。
+安装使用 `大愚 Agent` 前需安装 Python 3.11。
 
 #### 1.1.1 在线安装
 
-如果你当前机器可以联网，可以直接安装通过 `pip` 命令安装：
+如果你当前机器可以联网，可以直接通过 `pip` 安装稳定版 wheel。
 
 命令格式：
 
 ```bash
-pip install https://github.com/noho/dayu-agent/releases/download/<version>/dayu_agent-<version>-py3-none-any.whl
+python -m pip install https://github.com/noho/dayu-agent/releases/download/<version>/dayu_agent-<version>-py3-none-any.whl
 ```
 
 示例（替换为最新版本号）：
 
 ```bash
-pip install https://github.com/noho/dayu-agent/releases/download/v0.1.3/dayu_agent-0.1.3-py3-none-any.whl
+python -m pip install https://github.com/noho/dayu-agent/releases/download/v0.1.3/dayu_agent-0.1.3-py3-none-any.whl
 ```
 
-这种方式最轻，但安装耗时和成功率会受网络、平台和上游依赖发布状态影响。
+这种方式最轻，但安装耗时和成功率会受网络、平台和上游依赖发布状态影响。最新稳定版请以 [Releases](https://github.com/noho/dayu-agent/releases) 页面为准，复制对应版本的 wheel URL。
+
+如需安装 `main` 分支开发版（nightly），可以直接从 Git 安装：
+
+```bash
+python -m pip install --upgrade --force-reinstall "git+https://github.com/noho/dayu-agent.git@main"
+```
+
+也可以使用 `uv tool` 安装，让 `uv` 独立管理工具环境和 Python 3.11。`uv` 的安装方法请参考 [uv 官方安装文档](https://docs.astral.sh/uv/getting-started/installation/)。
+
+```bash
+uv tool install --force --managed-python --python 3.11 \
+  "dayu-agent @ https://github.com/noho/dayu-agent/releases/download/<version>/dayu_agent-<version>-py3-none-any.whl"
+```
+
+安装 `main` 分支开发版（nightly）：
+
+```bash
+uv tool install --force --refresh --managed-python --python 3.11 \
+  "git+https://github.com/noho/dayu-agent.git@main"
+```
+
+`uv tool install --force` 会替换已有的同名 `dayu-agent` 工具环境，但不会覆盖已有工作区数据和配置。安装后可用以下命令查看安装来源：
+
+```bash
+uv tool list --show-version-specifiers --show-python
+```
 
 #### 1.1.2 离线安装
 
@@ -91,7 +117,7 @@ cd .\dayu-agent-0.1.3-windows-x64-offline
 ```
 #### 1.1.3 clone 源代码安装
 
-源代码clone到本地后，运行：
+如果你要参与开发或本地调试源码，可以 clone 源代码后使用 editable 安装：
 
 ```bash
 python3.11 -m venv .venv
