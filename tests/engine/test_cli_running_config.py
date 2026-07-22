@@ -1409,6 +1409,28 @@ def test_parse_arguments_supports_prompt_label(monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.mark.unit
+def test_parse_arguments_supports_prompt_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    """验证 prompt 子命令支持把最终回答写入 Markdown 文件。"""
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "cli.py",
+            "prompt",
+            "生成风险报告",
+            "--output",
+            "reports/risk.md",
+        ],
+    )
+
+    parsed = parse_arguments()
+
+    assert parsed.command == "prompt"
+    assert parsed.output == "reports/risk.md"
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("argv", "ticker"),
     [
@@ -2573,6 +2595,7 @@ def test_main_prompt_path_returns_prompt_exit_code(monkeypatch: pytest.MonkeyPat
         quiet=False,
         thinking=False,
         model_name="deepseek-v4-flash-thinking",
+        output=str(tmp_path / "answer.md"),
     )
 
     prompt_kwargs: dict[str, object] = {}
@@ -2618,6 +2641,7 @@ def test_main_prompt_path_returns_prompt_exit_code(monkeypatch: pytest.MonkeyPat
     prompt_execution_options = cast(Any, prompt_kwargs["execution_options"])
     assert prompt_kwargs["ticker"] == "AAPL"
     assert prompt_kwargs["show_thinking"] is False
+    assert prompt_kwargs["output_path"] == (tmp_path / "answer.md").resolve()
     assert prompt_execution_options.model_name == "deepseek-v4-flash-thinking"
 
 
@@ -2807,6 +2831,7 @@ def test_run_prompt_command_routes_labeled_prompt_to_conversation_turn(
         label="apple",
         label_session_id="cli_conv_apple",
         label_scene_name=None,
+        output=str(tmp_path / "answer.md"),
     )
 
     prompt_kwargs: dict[str, object] = {}
@@ -2843,6 +2868,7 @@ def test_run_prompt_command_routes_labeled_prompt_to_conversation_turn(
     assert prompt_kwargs["scene_name"] == "prompt_mt"
     assert prompt_kwargs["ticker"] == "AAPL"
     assert prompt_kwargs["show_thinking"] is False
+    assert prompt_kwargs["output_path"] == (tmp_path / "answer.md").resolve()
     assert prompt_execution_options.model_name == "deepseek-v4-flash-thinking"
     assert any("执行带标签 prompt，恢复标签: apple" in item for item in info_logs)
 

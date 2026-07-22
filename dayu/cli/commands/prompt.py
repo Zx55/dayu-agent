@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import asdict
+from pathlib import Path
 
 from dayu.cli.dependency_setup import (
     WorkspaceConfig,
@@ -120,6 +121,7 @@ def _run_one_shot_prompt_command(
         ticker=paths_config.ticker,
         execution_options=execution_options,
         show_thinking=bool(getattr(args, "thinking", False)),
+        output_path=_resolve_prompt_output_path(args),
         run_lifecycle_observer=get_cli_shutdown_coordinator(),
     )
 
@@ -209,6 +211,7 @@ def _run_labeled_prompt_command(
                 ticker=paths_config.ticker,
                 execution_options=execution_options,
                 show_thinking=bool(getattr(args, "thinking", False)),
+                output_path=_resolve_prompt_output_path(args),
                 run_lifecycle_observer=get_cli_shutdown_coordinator(),
             )
     except ValueError as exc:
@@ -236,6 +239,25 @@ def _resolve_prompt_label(args: argparse.Namespace) -> str | None:
     if not normalized_label:
         return None
     return normalized_label
+
+
+def _resolve_prompt_output_path(args: argparse.Namespace) -> Path | None:
+    """解析 prompt 最终 Markdown 输出路径。
+
+    Args:
+        args: 解析后的命令行参数。
+
+    Returns:
+        展开用户目录并解析后的绝对路径；未提供时返回 ``None``。
+
+    Raises:
+        无。
+    """
+
+    raw_output_path = str(getattr(args, "output", "") or "").strip()
+    if not raw_output_path:
+        return None
+    return Path(raw_output_path).expanduser().resolve()
 
 
 def _resolve_label_session_id(args: argparse.Namespace) -> str | None:

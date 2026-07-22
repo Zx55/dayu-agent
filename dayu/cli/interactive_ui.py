@@ -9,14 +9,16 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import threading
 import time
 import unicodedata
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Any
-import sys
 
+from dayu.cli.prompt_artifacts import write_prompt_markdown
 from dayu.contracts.events import AppEventType, extract_cancel_reason
 from dayu.process_lifecycle import EXIT_CODE_SIGINT, RunLifecycleObserver
 from dayu.text import strip_markdown_fence
@@ -162,6 +164,7 @@ class _RenderState:
     """终端事件渲染状态。"""
 
     show_thinking: bool = False
+    suppress_content_output: bool = False
     status_line: _StatusLineController | None = None
     content_streamed: bool = False
     reasoning_streamed: bool = False
@@ -363,7 +366,8 @@ def _render_stream_event(event: Any, state: _RenderState) -> None:
     payload = _get_event_payload(event)
 
     if event_type == AppEventType.CONTENT_DELTA.value:
-        _handle_content_delta(state, str(payload or ""))
+        if not state.suppress_content_output:
+            _handle_content_delta(state, str(payload or ""))
         return
 
     if event_type == AppEventType.FINAL_ANSWER.value:
@@ -371,20 +375,21 @@ def _render_stream_event(event: Any, state: _RenderState) -> None:
         stripped = strip_markdown_fence(raw_content)
         state.final_content = stripped
         state.filtered = bool(payload.get("filtered", False)) if isinstance(payload, dict) else False
-        if state._pending_content_delta is not None:
-            # 有暂存 delta（疑似围栏模式），根据完整内容判断
-            if raw_content.startswith("```"):
-                # 确认是围栏：丢弃缓冲，渲染剥离后的正文
-                state._pending_content_delta = None
-                state.content_streamed = False
-                if stripped:
-                    _render_content_delta(state, stripped)
-            else:
-                # 非围栏：刷出缓冲（已是完整内容），无需再渲染
-                _render_content_delta(state, state._pending_content_delta)
-                state._pending_content_delta = None
-        elif stripped and not state.content_streamed:
-            _render_content_delta(state, stripped)
+        if not state.suppress_content_output:
+            if state._pending_content_delta is not None:
+                # 有暂存 delta（疑似围栏模式），根据完整内容判断
+                if raw_content.startswith("```"):
+                    # 确认是围栏：丢弃缓冲，渲染剥离后的正文
+                    state._pending_content_delta = None
+                    state.content_streamed = False
+                    if stripped:
+                        _render_content_delta(state, stripped)
+                else:
+                    # 非围栏：刷出缓冲（已是完整内容），无需再渲染
+                    _render_content_delta(state, state._pending_content_delta)
+                    state._pending_content_delta = None
+            elif stripped and not state.content_streamed:
+                _render_content_delta(state, stripped)
         if state.filtered:
             _render_warning_or_error(state, "[filtered] 本轮输出触发内容过滤，结果可能不完整")
         return
@@ -746,6 +751,7 @@ def _run_chat_turn_stream(
     ticker: str | None = None,
     execution_options: ExecutionOptions | None = None,
     show_thinking: bool = False,
+    suppress_content_output: bool = False,
     run_lifecycle_observer: RunLifecycleObserver | None = None,
 ) -> tuple[str, str]:
     """执行单轮 chat 的同步包装入口。
@@ -758,6 +764,7 @@ def _run_chat_turn_stream(
         ticker: 股票代码。
         execution_options: 请求级执行覆盖参数。
         show_thinking: 是否回显 thinking 增量。
+        suppress_content_output: 是否禁止向终端回显回答正文。
         run_lifecycle_observer: 可选的 run 生命周期观察者，用于配合
             进程级协调器在 Ctrl-C 时触发协作式取消。
 
@@ -769,7 +776,10 @@ def _run_chat_turn_stream(
         RuntimeError: Agent 创建失败时抛出。
     """
 
-    state = _RenderState(show_thinking=show_thinking)
+    state = _RenderState(
+        show_thinking=show_thinking,
+        suppress_content_output=suppress_content_output,
+    )
     status_line = _StatusLineController()
     status_line.update("思考中...")
     state.status_line = status_line
@@ -800,6 +810,7 @@ def _run_prompt_stream(
     ticker: str | None,
     execution_options: ExecutionOptions | None = None,
     show_thinking: bool = False,
+    suppress_content_output: bool = False,
     run_lifecycle_observer: RunLifecycleObserver | None = None,
 ) -> str:
     """执行单次 prompt 的同步包装入口。
@@ -810,6 +821,7 @@ def _run_prompt_stream(
         ticker: 股票代码。
         execution_options: 请求级执行覆盖参数。
         show_thinking: 是否回显 thinking 增量。
+        suppress_content_output: 是否禁止向终端回显回答正文。
         run_lifecycle_observer: 可选的 run 生命周期观察者；事件流首帧
             带 ``meta["run_id"]`` 时登记到协调器，让 Ctrl-C 走协作式取消。
 
@@ -821,7 +833,10 @@ def _run_prompt_stream(
         RuntimeError: Agent 创建失败时抛出。
     """
 
-    state = _RenderState(show_thinking=show_thinking)
+    state = _RenderState(
+        show_thinking=show_thinking,
+        suppress_content_output=suppress_content_output,
+    )
     status_line = _StatusLineController()
     status_line.update("思考中...")
     state.status_line = status_line
@@ -960,6 +975,7 @@ def prompt(
     ticker: str | None = None,
     execution_options: ExecutionOptions | None = None,
     show_thinking: bool = False,
+    output_path: Path | None = None,
     run_lifecycle_observer: RunLifecycleObserver | None = None,
 ) -> int:
     """执行单次 prompt 命令。
@@ -970,6 +986,7 @@ def prompt(
         ticker: 股票代码。
         execution_options: 请求级执行覆盖参数。
         show_thinking: 是否回显 thinking 增量。
+        output_path: 可选最终 Markdown 输出文件路径。
         run_lifecycle_observer: 可选的 run 生命周期观察者；用于让 Ctrl-C
             通过事件 ``meta["run_id"]`` 触发协作式取消，与 chat 路径一致。
 
@@ -981,17 +998,24 @@ def prompt(
     """
 
     try:
-        _run_prompt_stream(
+        final_content = _run_prompt_stream(
             prompt_service,
             user_input,
             ticker=ticker,
             execution_options=execution_options,
             show_thinking=show_thinking,
+            suppress_content_output=output_path is not None,
             run_lifecycle_observer=run_lifecycle_observer,
         )
+        if output_path is not None:
+            written_path = write_prompt_markdown(output_path, final_content)
+            print(f"Markdown 已保存: {written_path}")
     except KeyboardInterrupt:
         print("\n用户取消")
         return EXIT_CODE_SIGINT
+    except OSError as exc:
+        Log.error(f"写入 prompt Markdown 失败: {exc}", module=MODULE)
+        return 2
     except ValueError as exc:
         Log.error(str(exc), module=MODULE)
         return 2
@@ -1011,6 +1035,7 @@ def conversation_prompt(
     ticker: str | None = None,
     execution_options: ExecutionOptions | None = None,
     show_thinking: bool = False,
+    output_path: Path | None = None,
     run_lifecycle_observer: RunLifecycleObserver | None = None,
 ) -> int:
     """执行单轮 conversation prompt 命令。
@@ -1024,6 +1049,7 @@ def conversation_prompt(
         ticker: 股票代码。
         execution_options: 请求级执行覆盖参数。
         show_thinking: 是否回显 thinking 增量。
+        output_path: 可选最终 Markdown 输出文件路径。
         run_lifecycle_observer: 可选的进程级 run 生命周期观察者，
             用于让 Ctrl-C 触发 cooperative cancel。
 
@@ -1035,7 +1061,7 @@ def conversation_prompt(
     """
 
     try:
-        _run_chat_turn_stream(
+        final_content, _resolved_session_id = _run_chat_turn_stream(
             chat_service,
             user_input,
             session_id=session_id,
@@ -1043,14 +1069,21 @@ def conversation_prompt(
             ticker=ticker,
             execution_options=execution_options,
             show_thinking=show_thinking,
+            suppress_content_output=output_path is not None,
             run_lifecycle_observer=run_lifecycle_observer,
         )
+        if output_path is not None:
+            written_path = write_prompt_markdown(output_path, final_content)
+            print(f"Markdown 已保存: {written_path}")
         _print_label_hint_box(label)
     except KeyboardInterrupt:
         print("\n用户取消")
         return EXIT_CODE_SIGINT
     except ValueError as exc:
         Log.error(str(exc), module=MODULE)
+        return 2
+    except OSError as exc:
+        Log.error(f"写入 prompt Markdown 失败: {exc}", module=MODULE)
         return 2
     except RuntimeError as exc:
         Log.error(f"{exc}，退出 prompt 模式", module=MODULE)

@@ -295,6 +295,7 @@ dayu-cli <subcommand> [参数]
 | `--model-name` | `prompt` `interactive` `write` | 指定模型配置名称 |
 | `--temperature` | `prompt` `interactive` `write` | 覆盖模型 temperature |
 | `--label` | `prompt` `interactive` | 把当前对话绑定到可恢复 label；`prompt` 会进入 labeled multi-turn，对应 scene 为 `prompt_mt` |
+| `--output` | `prompt` | 把最终回答写入指定 Markdown 文件，并停止在终端回显回答正文 |
 | `--new-session` | `interactive` | 不续接上一次 interactive 多轮会话，改为从头开始一个新会话 |
 | `--web-provider` | `prompt` `interactive` `write` | 指定联网检索 provider，如 `auto`、`tavily`、`serper`、`duckduckgo` |
 | `--enable-tool-trace` | `prompt` `interactive` `write` | 开启工具调用追踪，覆盖 `run.json` 中的 trace 配置 |
@@ -514,6 +515,7 @@ dayu-cli upload_material \
 | `prompt` | 必填，单次执行的问题文本 |
 | `--ticker` | 可选，指定研究对象 |
 | `--label` | 可选，把本次提问绑定到可恢复 conversation；首次创建时 scene 为 `prompt_mt` |
+| `--output` | 可选，把最终回答写入指定 Markdown 文件；自动创建父目录，启用后不在终端回显回答正文 |
 | `--model-name` | 可选，指定模型配置 |
 | `--temperature` | 可选，覆盖模型 temperature |
 | `--thinking` / `--no-thinking` | 可选，控制是否回显模型思考过程 |
@@ -531,6 +533,7 @@ dayu-cli prompt "总结苹果最新财报中的主要风险"
 dayu-cli prompt "总结最新财报中的主要风险" --ticker AAPL
 dayu-cli prompt "总结苹果最新财报中的主要风险" --thinking
 dayu-cli prompt --label apple "先总结苹果最新财报中的主要风险"
+dayu-cli prompt --label apple --output ./workspace/output/prompt/apple-risk.md "生成完整风险报告"
 dayu-cli prompt "总结苹果最新财报中的主要风险" --model-name mimo-v2.5-pro
 dayu-cli prompt "总结苹果最新财报中的主要风险" --debug
 ```
@@ -539,6 +542,7 @@ dayu-cli prompt "总结苹果最新财报中的主要风险" --debug
 - 使用之前请先下载/上传财报。
 - 两种写法都可以：要么在问题里直接写公司名或股票代码，要么用 `--ticker` 明确指定研究对象；一般不需要两边重复写。
 - 不带 `--label` 时，`prompt` 保持 one-shot，不承诺后续恢复；带 `--label` 时，本次提问会挂到该 label 对应的可恢复 conversation 上，后续可继续用 `prompt --label <label>` 或 `interactive --label <label>` 接着问。
+- 传入 `--output` 时，CLI 会把去除外层 Markdown 围栏后的最终回答原子写入目标文件；相对路径按当前工作目录解析，父目录不存在时自动创建。终端只保留进度、告警、label 提示与最终文件路径，不再回显回答正文。
 - 带 `--label` 的 prompt 在本轮拿到最终回答前会独占该 label；如果另一个进程此时也尝试复用同一个 label，CLI 会直接报错并提示等待当前对话结束，或改用新的 `--label`。
 - 默认不回显模型思考过程；如需在终端查看，显式传 `--thinking`。
 

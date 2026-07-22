@@ -1912,6 +1912,96 @@ def test_conversation_prompt_prints_label_hint_box(
 
 
 @pytest.mark.unit
+def test_prompt_output_writes_markdown_without_echoing_answer(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """验证 one-shot prompt 会写入 Markdown 且不回显正文。
+
+    Args:
+        tmp_path: pytest 临时目录。
+        capsys: pytest 标准输出捕获器。
+
+    Returns:
+        无。
+
+    Raises:
+        AssertionError: 文件内容或终端输出不符合预期时抛出。
+    """
+
+    fake_session_cls = _build_event_session(
+        [
+            StreamEvent(type=EventType.CONTENT_DELTA, data="# 风险报告", metadata={}),
+            StreamEvent(
+                type=EventType.FINAL_ANSWER,
+                data={"content": "```markdown\n# 风险报告\n\n正文\n```", "degraded": False},
+                metadata={},
+            ),
+        ]
+    )
+    output_path = tmp_path / "reports" / "risk.md"
+
+    result = app_interactive.prompt(
+        fake_session_cls.create(),
+        "生成风险报告",
+        output_path=output_path,
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert output_path.read_text(encoding="utf-8") == "# 风险报告\n\n正文"
+    assert "# 风险报告" not in captured.out
+    assert f"Markdown 已保存: {output_path.resolve()}" in captured.out
+
+
+@pytest.mark.unit
+def test_conversation_prompt_output_writes_markdown_and_keeps_label_hint(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """验证 labeled prompt 会写入 Markdown、隐藏正文并保留 label 提示。
+
+    Args:
+        tmp_path: pytest 临时目录。
+        capsys: pytest 标准输出捕获器。
+
+    Returns:
+        无。
+
+    Raises:
+        AssertionError: 文件内容或终端输出不符合预期时抛出。
+    """
+
+    fake_session_cls = _build_event_session(
+        [
+            StreamEvent(type=EventType.CONTENT_DELTA, data="完整回答", metadata={}),
+            StreamEvent(
+                type=EventType.FINAL_ANSWER,
+                data={"content": "完整回答", "degraded": False},
+                metadata={},
+            ),
+        ]
+    )
+    output_path = tmp_path / "answer.md"
+
+    result = app_interactive.conversation_prompt(
+        fake_session_cls.create(),
+        "继续分析",
+        label="apple-risk",
+        session_id="cli_conv_apple_risk",
+        scene_name="prompt_mt",
+        output_path=output_path,
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert output_path.read_text(encoding="utf-8") == "完整回答"
+    assert "完整回答" not in captured.out
+    assert f"Markdown 已保存: {output_path.resolve()}" in captured.out
+    assert "| 标签: apple-risk |" in captured.out
+
+
+@pytest.mark.unit
 def test_interactive_passes_execution_options_into_chat_turn_request(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

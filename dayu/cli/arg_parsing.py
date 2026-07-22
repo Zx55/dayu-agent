@@ -629,6 +629,12 @@ def _create_parser() -> argparse.ArgumentParser:
         default=None,
         help="把本次 prompt 绑定到指定 label 的可复用对话。",
     )
+    prompt_parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="把最终回答写入指定 Markdown 文件；启用后不在终端回显回答正文。",
+    )
     _add_model_name_arg(
         prompt_parser,
         help_text="LLM 配置名称（未传时使用 interactive scene manifest 的 model.default_name）",
