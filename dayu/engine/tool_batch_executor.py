@@ -108,7 +108,10 @@ class ToolBatchExecutor:
         except asyncio.TimeoutError:
             child.cancel()
             cooperative = bool(executor.get_execution_context_param_name(call["name"]))
-            timeout_meta: dict[str, JsonValue] = {"execution_may_continue": not cooperative}
+            # 能注入 context 只证明已发送取消，不能据此确认原生线程已停止。
+            timeout_meta: dict[str, JsonValue] = {
+                "execution_may_continue": True, "cancellation_requested": cooperative,
+            }
             if not cooperative:
                 timeout_meta["orphan_thread_warning"] = True
             result = build_error(
