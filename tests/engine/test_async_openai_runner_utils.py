@@ -494,7 +494,7 @@ async def test_run_tool_call_context_timeout_prefers_tool_timeout_seconds():
 
 
 @pytest.mark.asyncio
-async def test_run_tool_call_timeout_marks_cooperative_tool_as_not_continuing() -> None:
+async def test_run_tool_call_timeout_requests_cancellation_without_claiming_completion() -> None:
     """显式声明 execution context 的工具超时后，应标记为已请求协作取消。"""
 
     class _CooperativeExecutor(_ToolExecutorMixin):
@@ -538,7 +538,8 @@ async def test_run_tool_call_timeout_marks_cooperative_tool_as_not_continuing() 
     )
 
     assert result["result"]["error"] == "tool_execution_timeout"
-    assert _result_meta(result)["execution_may_continue"] is False
+    assert _result_meta(result)["execution_may_continue"] is True
+    assert _result_meta(result)["cancellation_requested"] is True
     assert "orphan_thread_warning" not in _result_meta(result)
 
     await asyncio.sleep(0.05)
