@@ -16,7 +16,7 @@ import unicodedata
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, TypeVar
 
 from dayu.cli.prompt_artifacts import write_prompt_markdown
 from dayu.contracts.events import AppEventType, extract_cancel_reason
@@ -30,6 +30,7 @@ from dayu.services.protocols import ChatServiceProtocol, PromptServiceProtocol
 
 MODULE = "APP.INTERACTIVE"
 _WIDE_EAST_ASIAN_WIDTHS = frozenset(("F", "W"))
+_StreamResult = TypeVar("_StreamResult")
 
 
 
@@ -742,6 +743,48 @@ async def _consume_prompt_stream(
     return state.final_content
 
 
+def _finish_rendering(state: _RenderState) -> None:
+    """在事件流结束时释放状态显示，不等待 event loop 清理线程池。
+
+    Args:
+        state: 当前轮次渲染状态。
+    Returns:
+        无。
+    Raises:
+        无。
+    """
+    if state.status_line is not None:
+        state.status_line.stop()
+        state.status_line = None
+    _ensure_reasoning_newline(state)
+    _ensure_newline(state)
+
+
+async def _consume_and_deliver(
+    stream: Awaitable[_StreamResult], state: _RenderState, output_path: Path | None
+) -> _StreamResult:
+    """流正常完成后交付答案，再允许 asyncio.run 进入资源清理。
+
+    Args:
+        stream: 已准备的单轮事件消费操作。
+        state: 当前轮次渲染结果。
+        output_path: 可选 Markdown 目标路径。
+    Returns:
+        原始事件消费结果。
+    Raises:
+        OSError: 文件写入失败。
+        Exception: 事件流异常原样传播，不交付部分结果。
+    """
+    try:
+        result = await stream
+    finally:
+        _finish_rendering(state)
+    if output_path is not None:
+        written_path = write_prompt_markdown(output_path, state.final_content)
+        print(f"Markdown 已保存: {written_path}")
+    return result
+
+
 def _run_chat_turn_stream(
     session: ChatServiceProtocol,
     user_input: str,
@@ -752,6 +795,7 @@ def _run_chat_turn_stream(
     execution_options: ExecutionOptions | None = None,
     show_thinking: bool = False,
     suppress_content_output: bool = False,
+    output_path: Path | None = None,
     run_lifecycle_observer: RunLifecycleObserver | None = None,
 ) -> tuple[str, str]:
     """执行单轮 chat 的同步包装入口。
@@ -765,6 +809,7 @@ def _run_chat_turn_stream(
         execution_options: 请求级执行覆盖参数。
         show_thinking: 是否回显 thinking 增量。
         suppress_content_output: 是否禁止向终端回显回答正文。
+        output_path: 事件流正常完成后、资源清理前写入的目标路径。
         run_lifecycle_observer: 可选的 run 生命周期观察者，用于配合
             进程级协调器在 Ctrl-C 时触发协作式取消。
 
@@ -785,22 +830,23 @@ def _run_chat_turn_stream(
     state.status_line = status_line
     try:
         return asyncio.run(
-            _consume_chat_turn_stream(
-                session,
-                user_input,
+            _consume_and_deliver(
+                _consume_chat_turn_stream(
+                    session,
+                    user_input,
+                    state,
+                    session_id=session_id,
+                    scene_name=scene_name,
+                    ticker=ticker,
+                    execution_options=execution_options,
+                    run_lifecycle_observer=run_lifecycle_observer,
+                ),
                 state,
-                session_id=session_id,
-                scene_name=scene_name,
-                ticker=ticker,
-                execution_options=execution_options,
-                run_lifecycle_observer=run_lifecycle_observer,
+                output_path,
             )
         )
     finally:
-        status_line.stop()
-        state.status_line = None
-        _ensure_reasoning_newline(state)
-        _ensure_newline(state)
+        _finish_rendering(state)
 
 
 def _run_prompt_stream(
@@ -811,6 +857,7 @@ def _run_prompt_stream(
     execution_options: ExecutionOptions | None = None,
     show_thinking: bool = False,
     suppress_content_output: bool = False,
+    output_path: Path | None = None,
     run_lifecycle_observer: RunLifecycleObserver | None = None,
 ) -> str:
     """执行单次 prompt 的同步包装入口。
@@ -822,6 +869,7 @@ def _run_prompt_stream(
         execution_options: 请求级执行覆盖参数。
         show_thinking: 是否回显 thinking 增量。
         suppress_content_output: 是否禁止向终端回显回答正文。
+        output_path: 事件流正常完成后、资源清理前写入的目标路径。
         run_lifecycle_observer: 可选的 run 生命周期观察者；事件流首帧
             带 ``meta["run_id"]`` 时登记到协调器，让 Ctrl-C 走协作式取消。
 
@@ -842,20 +890,21 @@ def _run_prompt_stream(
     state.status_line = status_line
     try:
         return asyncio.run(
-            _consume_prompt_stream(
-                session,
-                user_input,
+            _consume_and_deliver(
+                _consume_prompt_stream(
+                    session,
+                    user_input,
+                    state,
+                    ticker=ticker,
+                    execution_options=execution_options,
+                    run_lifecycle_observer=run_lifecycle_observer,
+                ),
                 state,
-                ticker=ticker,
-                execution_options=execution_options,
-                run_lifecycle_observer=run_lifecycle_observer,
+                output_path,
             )
         )
     finally:
-        status_line.stop()
-        state.status_line = None
-        _ensure_reasoning_newline(state)
-        _ensure_newline(state)
+        _finish_rendering(state)
 
 def interactive(
     agent_session: ChatServiceProtocol,
@@ -998,18 +1047,16 @@ def prompt(
     """
 
     try:
-        final_content = _run_prompt_stream(
+        _run_prompt_stream(
             prompt_service,
             user_input,
             ticker=ticker,
             execution_options=execution_options,
             show_thinking=show_thinking,
             suppress_content_output=output_path is not None,
+            output_path=output_path,
             run_lifecycle_observer=run_lifecycle_observer,
         )
-        if output_path is not None:
-            written_path = write_prompt_markdown(output_path, final_content)
-            print(f"Markdown 已保存: {written_path}")
     except KeyboardInterrupt:
         print("\n用户取消")
         return EXIT_CODE_SIGINT
@@ -1061,7 +1108,7 @@ def conversation_prompt(
     """
 
     try:
-        final_content, _resolved_session_id = _run_chat_turn_stream(
+        _run_chat_turn_stream(
             chat_service,
             user_input,
             session_id=session_id,
@@ -1070,11 +1117,9 @@ def conversation_prompt(
             execution_options=execution_options,
             show_thinking=show_thinking,
             suppress_content_output=output_path is not None,
+            output_path=output_path,
             run_lifecycle_observer=run_lifecycle_observer,
         )
-        if output_path is not None:
-            written_path = write_prompt_markdown(output_path, final_content)
-            print(f"Markdown 已保存: {written_path}")
         _print_label_hint_box(label)
     except KeyboardInterrupt:
         print("\n用户取消")
