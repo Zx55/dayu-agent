@@ -781,7 +781,9 @@ class AsyncOpenAIRunner:
             tool_cancellation_token.cancel()
             supports_execution_context = self._tool_supports_execution_context(tool_call["name"])
             timeout_meta: dict[str, Any] = {
-                "execution_may_continue": not supports_execution_context,
+                # context 注入只能证明已发送取消，不能证明底层线程已退出。
+                "execution_may_continue": True,
+                "cancellation_requested": supports_execution_context,
             }
             timeout_hint = "tool execution timed out and cancellation was requested"
             timeout_log_suffix = "已触发协作式取消"

@@ -995,6 +995,8 @@ python -m utils.analyze_tool_trace \
 
 ### 5.1 网页抓取诊断
 
+网页 PDF 等非 HTML 文档的 OCR 转换受本次工具剩余总预算约束。工具超时或取消时会终止并回收转换进程，避免原生 OCR 继续占用 CPU 或拖住 CLI 退出。首次转换仍有模型加载开销。trace 中的 `cancellation_requested` 表示已发送取消，`execution_may_continue` 不会仅凭工具接收了取消参数就宣称执行已经停止。
+
 当你遇到“浏览器能打开，但 `fetch_web_page` / `requests` / Playwright 访问失败”的 URL 时，可以用下面的脚本把同源证据导出成 JSON：
 
 ```bash

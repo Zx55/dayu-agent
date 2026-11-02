@@ -11,15 +11,12 @@ import re
 from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from threading import Lock
+from typing import Protocol
 from urllib.parse import urljoin, urlparse
 
 import requests
 from requests.structures import CaseInsensitiveDict
 from dayu.contracts.cancellation import CancellationToken
-from dayu.docling_runtime import (
-    DoclingRuntimeInitializationError,
-    convert_pdf_bytes_with_docling,
-)
 from bs4 import BeautifulSoup
 
 from dayu.engine.processors.html_pipeline import HtmlPipelineResult, HtmlPipelineStageError
@@ -689,43 +686,28 @@ def _infer_docling_stream_name(*, url: str, content_type: str) -> str:
     return "page.bin"
 
 
-def _docling_convert_to_markdown(raw_bytes: bytes, stream_name: str) -> tuple[str, str, str]:
-    """使用 Docling 将非 HTML 原始字节转换为 Markdown。
+class _DocumentConverter(Protocol):
+    """网页文档转换必须接收剩余预算和工具取消信号。"""
 
-    Args:
-        raw_bytes: 页面原始内容字节。
-        stream_name: 流名称，决定 Docling 解析模式。
+    def __call__(
+        self, raw_bytes: bytes, stream_name: str, *, timeout_seconds: float,
+        cancellation_token: CancellationToken | None,
+    ) -> tuple[str, str, str]:
+        """转换文档。
 
-    Returns:
-        ``(title, markdown, extraction_source)`` 三元组。
-
-    Raises:
-        DoclingRuntimeInitializationError: Docling 装配失败时抛出。
-        RuntimeError: Docling 转换失败时抛出。
-    """
-
-    try:
-        result = convert_pdf_bytes_with_docling(
-            raw_bytes,
-            stream_name=stream_name,
-            do_ocr=True,
-            do_table_structure=True,
-            table_mode="accurate",
-            do_cell_matching=True,
-        )
-    except DoclingRuntimeInitializationError:
-        raise
-    except Exception as exc:
-        raise RuntimeError(f"Docling 转换失败: {exc}") from exc
-
-    markdown = result.document.export_to_markdown().strip()
-    title = ""
-    for line in markdown.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("#"):
-            title = stripped.lstrip("#").strip()
-            break
-    return title, markdown, "docling"
+        Args:
+            raw_bytes: 下载内容。
+            stream_name: 文档名称。
+            timeout_seconds: 剩余预算。
+            cancellation_token: 当前工具取消信号。
+        Returns:
+            标题、Markdown 和来源。
+        Raises:
+            TimeoutError: 预算耗尽。
+            CancelledError: 已取消。
+            RuntimeError: 转换失败。
+        """
+        ...
 
 
 def _fetch_and_convert_content(
@@ -736,7 +718,7 @@ def _fetch_and_convert_content(
     normalize_url_for_http: Callable[[str], str],
     build_referer: Callable[[str], str],
     convert_html: Callable[..., HtmlPipelineResult],
-    convert_non_html: Callable[[bytes, str], tuple[str, str, str]],
+    convert_non_html: _DocumentConverter,
     session: requests.Session | None = None,
     get_web_session: Callable[[], requests.Session] | None = None,
     headers: dict[str, str] | None = None,
@@ -874,6 +856,11 @@ def _fetch_and_convert_content(
                     url=getattr(response, "url", current_url),
                     content_type=content_type,
                 ),
+                timeout_seconds=resolve_timeout_budget(
+                    timeout_budget if timeout_budget is not None else timeout_seconds,
+                    timeout_budget=timeout_budget, deadline_monotonic=deadline_monotonic,
+                ),
+                cancellation_token=cancellation_token,
             )
             renderer_source = "docling"
             normalization_applied = False

@@ -2,6 +2,8 @@
 
 本文档只说明测试分层、运行方式和维护规则。具体业务背景与代码架构请看各包 README。
 
+`tests/engine/test_web_document_backend.py` 使用真实 spawn 子进程验证网页文档转换的结果发布、大结果、崩溃、超时、取消及忽略 SIGTERM 后的回收。转换后必须没有残留子进程和临时目录，异步工具超时不得拖住默认线程池关闭。Docling 内容质量由 `test_web_fetch_docling_integration.py` 的真实 PDF 路径验证。
+
 ## 1. 目录分层
 
 当前测试按五组组织：
