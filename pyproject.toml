@@ -34,6 +34,8 @@ classifiers = [
 
 # 运行依赖：与 requirements.txt 的“生产依赖”段保持一致。
 dependencies = [
+    "PyJWT[crypto]>=2.10,<3",
+    "filelock>=3.16",
     "requests>=2.32.2",
     "httpx>=0.28.0",
     "beautifulsoup4>=4.12.3",

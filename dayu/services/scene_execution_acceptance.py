@@ -71,7 +71,7 @@ class AcceptedSceneExecution:
     scene_definition: SceneDefinition
     resolved_execution_options: ResolvedExecutionOptions
     model_config: ModelConfig
-    resolved_temperature: float
+    resolved_temperature: float | None
     accepted_execution_spec: AcceptedExecutionSpec
 
     @property
@@ -200,7 +200,7 @@ def _build_accepted_execution_spec(
     *,
     resolved_execution_options: ResolvedExecutionOptions,
     model_config: ModelConfig,
-    resolved_temperature: float,
+    resolved_temperature: float | None,
 ) -> AcceptedExecutionSpec:
     """根据已接受执行选项构造 AcceptedExecutionSpec。"""
 

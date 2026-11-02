@@ -12,17 +12,21 @@ from dayu.contracts.agent_execution import AgentCreateArgs
 from dayu.contracts.model_config import (
     OpenAICompatibleRunnerParams,
     RunnerType,
+    ResponsesRunnerParams,
     ensure_runner_type_enabled,
 )
 from dayu.engine.async_openai_runner import AsyncOpenAIRunner, AsyncOpenAIRunnerRunningConfig
 from dayu.contracts.cancellation import CancellationToken
 from dayu.engine.protocols import AsyncRunner
+from dayu.engine.async_responses_runner import AsyncResponsesRunner
+from dayu.contracts.model_credentials import ModelCredentialProvider
 
 
 def create_runner(
     agent_create_args: AgentCreateArgs,
     *,
     cancellation_token: CancellationToken | None = None,
+    credentials: ModelCredentialProvider | None = None,
 ) -> AsyncRunner:
     """根据 ``AgentCreateArgs`` 构造底层 Runner。
 
@@ -38,6 +42,19 @@ def create_runner(
     """
 
     runner_type = ensure_runner_type_enabled(agent_create_args.runner_type)
+    if runner_type == RunnerType.OPENAI_RESPONSES:
+        params = cast(ResponsesRunnerParams, agent_create_args.runner_params)
+        if credentials is None:
+            raise ValueError("Responses Runner 缺少凭据提供器")
+        snapshot = agent_create_args.runner_running_config
+        return AsyncResponsesRunner(
+            model=params.get("model", ""), credentials=credentials,
+            reasoning_effort=params.get("reasoning_effort", "medium"),
+            timeout=params.get("timeout", 3600), max_retries=params.get("max_retries", 2),
+            stream_idle_timeout=snapshot.get("stream_idle_timeout") or 120,
+            tool_timeout=snapshot.get("tool_timeout_seconds") or 90,
+            cancellation_token=cancellation_token,
+        )
     if runner_type == RunnerType.OPENAI_COMPATIBLE:
         runner_params = cast(OpenAICompatibleRunnerParams, agent_create_args.runner_params)
         endpoint_url = runner_params.get("endpoint_url")

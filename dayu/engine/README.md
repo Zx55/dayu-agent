@@ -118,6 +118,15 @@ class AsyncRunner(Protocol):
 - Runner 为取消观察临时注册到 `CancellationToken` 的回调必须在本轮调用结束后注销；复用同一 token 的多轮调用不允许累积历史 loop/future 闭包
 - `await_or_cancel` 在等待业务 awaitable 时，对内层抛出的 `RuntimeError` 走双门控收口：仅当 `cancellation_token` 已取消，且错误文本严格匹配 `"cannot schedule new futures after shutdown"` 时（双 Ctrl-C 后 asyncio 默认 executor shutdown，DNS `getaddrinfo` 等路径仍 `executor.submit` 撞上的固定异常），才将其映射成 `CancelledError` 并以单行 warn 收口；其余情形原样上抛，禁止误吞业务异常
 
+Responses 实现：
+- `AsyncResponsesRunner` 调用公共 HTTP/SSE Responses 接口，每次发送完整客户端历史。只在 `response.completed` 且输出校验成功后执行工具，不以部分参数或流断开作为执行依据。
+- 上下文超限错误归一为 `context_overflow`，交由 Agent 触发压缩。`response.incomplete` 的 `max_output_tokens` / `max_messages` 映射为截断续写，保留对应 continuation；`content_filter` 映射为过滤终态，不续写。其余 incomplete 原因报错，任何 incomplete 响应中的工具请求均不执行。
+- `responses_codec` 负责消息与工具 namespace 转换，`responses_stream_parser` 负责 SSE framing。模型不拥有 Dayu 工具的执行权。
+- `ToolBatchExecutor` 被两个 Runner 共用，负责工具上下文、并发、超时、取消与工具事件。`AsyncAgent` 的结果回填和跨轮治理保持原职责。
+- assistant 的 `model_continuation` 携带完整有序模型输出，绑定账号身份和模型。Agent 仅保留该步骤的状态，Runner 解释协议。压缩沿用工具组原子边界，状态不作为正文或摘要，也不透传到 UI。
+- 认证提供器由 Host 装配注入。Runner 不读取账号文件、不发起交互登录。认证、额度与协议错误均以不可恢复事件结束当前调用；取消继续抛出共享取消异常。
+- 刷新响应一旦完整返回，凭据提供器先同步校验并原子保存轮换结果，再等待客户端异步关闭，避免关闭阶段取消丢失新 token。刷新接口的 429/5xx 在解析 JSON 前按 HTTP 状态分类，HTML 或空错误响应同样可有限退避，永久 4xx 不按临时错误重试。
+
 历史残留实现：
 - `AsyncCliRunner`：已禁用，仅保留源码以便迁移旧实现，不允许再通过配置或 Host 主链路使用；已从 `dayu.engine` 包级公共导出移除，测试等内部使用方须通过 `dayu.engine.async_cli_runner` 直接导入
 

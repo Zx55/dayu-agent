@@ -10,3 +10,7 @@
 #                                 # 受控全量开发环境
 
 -e .[test,dev,browser,web]
+
+# ChatGPT OAuth 验签与凭据跨进程锁
+PyJWT[crypto]>=2.10,<3
+filelock>=3.16

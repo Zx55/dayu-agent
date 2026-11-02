@@ -161,6 +161,22 @@ dayu-render --help
 dayu-web --help
 ```
 
+### ChatGPT 账号登录
+
+`dayu-cli init` 的模型方案菜单支持“ChatGPT 订阅（账号登录）”。API key 与账号登录使用不同初始化流程。ChatGPT 路径通过系统浏览器授权，读取账号模型目录并写入 `workspace/config/llm_models.json`，随后更新 scene manifest。模型上下文上限若未由目录提供，需要按模型文档填写。
+
+已有工作区可以只重新配置指定 provider，无需重新配置搜索 Key 或 HuggingFace：
+
+```bash
+dayu-cli init --base ~/.dayu/workspace --provider chatgpt
+```
+
+`--provider` 也接受已有 API/Ollama 方案名称。它要求工作区已初始化，不可与 `--reset`、`--overwrite` 同用。首次创建工作区仍运行完整 `init`。正常调用继续使用 `--model-name chatgpt` 或 `--model-name chatgpt-thinking`，两者是同一选定模型的不同推理档位。
+
+包内 `llm_models.json` 提供两个 ChatGPT 订阅模板：`chatgpt-thinking` 默认使用 `gpt-6.1-sol` / `high`，`chatgpt` 默认使用同一模型 / `low`。初始化从这两个模板生成工作区条目，优先选中账号目录中的模板模型，不依赖返回顺序。若该模型不可见，会提示并让你选择可用模型。模型窗口以目录值或手动确认值为准，thinking 档位可在初始化中调整，之后仍可编辑工作区 JSON。
+
+ChatGPT token 保存在 `~/.config/dayu/auth/` 的受保护文件中，不写入模型 JSON、shell profile 或执行快照。临近过期自动刷新，确认授权失效时终止当前运行并提示重新配置。网络故障或额度不足不会清除凭据，也不会自动切换到 API 计费。新登录先准备候选授权，完成模型选择及 scene 默认项写入后才替换当前连接。初始化异常或用户中断会回滚本次模型配置和凭据修改。此回滚不保证断电或强制杀进程时的多文件原子性。
+
 ### 1.3 初始化工作区与配置
 
 安装后运行一次 `init`，交互式完成配置复制、模型供应商选择和 API Key 设置：

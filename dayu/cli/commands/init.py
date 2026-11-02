@@ -19,6 +19,7 @@ import subprocess
 import sys
 from argparse import Namespace
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 import urllib.error
 import urllib.request
@@ -31,6 +32,7 @@ from dayu.contracts.env_keys import (
     SERPER_API_KEY_ENV,
     TAVILY_API_KEY_ENV,
 )
+import httpx
 from dayu.workspace_paths import build_dayu_root_path
 
 MODULE = "CLI.INIT"
@@ -79,6 +81,14 @@ _PROVIDERS_ALLOWING_EMPTY_API_KEY: frozenset[str] = (
 )
 
 
+class ProviderAuthMode(StrEnum):
+    """初始化认证策略，支持后续新增登录型供应商。"""
+
+    API_KEY = "api_key"
+    LOGIN = "login"
+    NONE = "none"
+
+
 @dataclass(frozen=True)
 class _ProviderOption:
     """`dayu-cli init` 中的单个初始化模型方案定义。"""
@@ -88,6 +98,7 @@ class _ProviderOption:
     api_key_name: str
     non_thinking_model: str
     thinking_model: str
+    auth_mode: ProviderAuthMode = ProviderAuthMode.API_KEY
 
     def __post_init__(self) -> None:
         """校验一级 provider 选项配置自洽。
@@ -104,7 +115,8 @@ class _ProviderOption:
         """
 
         if (
-            self.option_key not in _PROVIDERS_ALLOWING_EMPTY_API_KEY
+            self.auth_mode == ProviderAuthMode.API_KEY
+            and self.option_key not in _PROVIDERS_ALLOWING_EMPTY_API_KEY
             and not self.api_key_name
         ):
             raise ValueError(
@@ -326,6 +338,7 @@ _PROVIDER_OPTIONS: tuple[_ProviderOption, ...] = (
     _ProviderOption(
         option_key=_PROVIDER_OPTION_OLLAMA,
         display_name="本地 Ollama 模型",
+        auth_mode=ProviderAuthMode.NONE,
         api_key_name="",
         non_thinking_model=_OLLAMA_CATALOG_KEY,
         thinking_model=_OLLAMA_CATALOG_KEY,
@@ -336,6 +349,11 @@ _PROVIDER_OPTIONS: tuple[_ProviderOption, ...] = (
         api_key_name="CUSTOM_OPENAI_API_KEY",
         non_thinking_model=_CUSTOM_CATALOG_KEY,
         thinking_model=_CUSTOM_CATALOG_KEY,
+    ),
+    _ProviderOption(
+        option_key="chatgpt", display_name="ChatGPT 订阅（账号登录）",
+        api_key_name="", non_thinking_model="chatgpt", thinking_model="chatgpt-thinking",
+        auth_mode=ProviderAuthMode.LOGIN,
     ),
 )
 
@@ -1707,83 +1725,28 @@ def _prompt_sec_user_agent() -> tuple[str, str] | None:
 # --------------------------------------------------------------------------- #
 
 
-def run_init_command(args: Namespace) -> int:
-    """执行 ``dayu-cli init`` 子命令。
+@dataclass(frozen=True)
+class ProviderSetupResult:
+    """认证方式无关的初始化结果。"""
+
+    configured: bool
+    non_thinking_model: str
+    thinking_model: str
+    env_vars_written: bool = False
+
+
+def _configure_api_provider(chosen_option: _ProviderOption, config_dir: Path) -> ProviderSetupResult:
+    """沿用 API key 或无需认证 provider 的配置流程。
 
     Args:
-        args: 解析后的命令行参数，包含 ``base``（工作区目录）、
-            ``overwrite``（是否覆盖已有配置）与 ``reset``（是否先重置工作区状态）。
-
+        chosen_option: 已选择的方案。
+        config_dir: 工作区配置目录。
     Returns:
-        退出码，0 表示成功。
-
+        认证和模型准备结果。
     Raises:
-        无。
+        ValueError: 模型配置非法。
     """
-
-    base_dir = Path(args.base).resolve()
-    overwrite: bool = bool(getattr(args, "overwrite", False))
-    reset: bool = bool(getattr(args, "reset", False))
-    # --reset 删除的 .dayu/ / config/ / assets/ 与下面 _copy_config /
-    # _copy_assets / apply_all_workspace_migrations 操作的是同一批 workspace
-    # 产物；如果 reset 在锁外执行，另一个 dayu-cli init 进程仍可能在我们
-    # 删除 → 复制的中间窗口进入临界区，导致"我刚写进去你又删掉"或
-    # "迁移跑到一半目录被 reset 清空"的竞态。所以 reset 也必须在 advisory
-    # lock 之内。但 reset 之前的交互确认（input/y/N）应当在锁外完成，
-    # 避免长时间持锁阻塞其他 init 进程。
-    if reset:
-        if not _confirm_workspace_reset(base_dir):
-            print("已取消工作区重置。")
-            return 1
-
-    is_first_workspace_init = reset or not (base_dir / "config").exists()
-    # 1. 复制配置 / assets 与跑工作区迁移属于 workspace 级临界区：双 init
-    # 并发会互相踩踏 SQLite 写事务、run.json 原子替换以及 config 目录复制。
-    # 用 advisory lock 排他独占。base_dir 在 `_resolve_workspace_root` 中
-    # 已确保存在，可直接落锁文件 `.dayu_init.lock`。
-    base_dir.mkdir(parents=True, exist_ok=True)
-    workspace_init_lock = StateDirSingleInstanceLock(
-        state_dir=base_dir,
-        lock_file_name=_INIT_WORKSPACE_LOCK_FILE_NAME,
-        lock_name=_INIT_WORKSPACE_LOCK_NAME,
-    )
-    try:
-        workspace_init_lock.acquire()
-    except RuntimeError as exc:
-        print(f"\n❌ {exc}")
-        print("   同一 workspace 已有另一个 dayu-cli init 进程在运行，请等待其完成后重试。")
-        return 1
-    try:
-        if reset:
-            removed_targets = _reset_workspace_init_targets(base_dir)
-            if removed_targets:
-                removed_names = "、".join(path.name for path in removed_targets)
-                print(f"✓ 已重置工作区初始化目录: {removed_names}")
-            else:
-                target_names = "、".join(
-                    path.name for path in _build_workspace_reset_targets(base_dir)
-                )
-                print(f"✓ 已执行工作区重置：未发现需要删除的 {target_names}")
-
-        config_dir = _copy_config(base_dir, overwrite=overwrite)
-        print(f"✓ 配置已复制到: {config_dir}")
-
-        # 1b. 复制 assets（定性分析模板等）
-        assets_dir = _copy_assets(base_dir, overwrite=overwrite)
-        print(f"✓ assets 已复制到: {assets_dir}")
-
-        # 1c. 对旧工作区应用一次性迁移（run.json、Host SQLite）。
-        # 具体规则集中在 dayu.cli.workspace_migrations，避免混入 init 常规流程。
-        apply_all_workspace_migrations(base_dir=base_dir, config_dir=config_dir)
-    finally:
-        workspace_init_lock.release()
-
-    # 2. 选择初始化模型方案 + 输入 API Key（已有则跳过）
-    chosen_option_key = _prompt_provider_selection()
-    chosen_option = _PROVIDER_OPTIONS_BY_KEY[chosen_option_key]
-    # 持久化用户选择，供下次 init 在共享 API Key 的多套方案间保留偏好；
-    # 即便当前 init 后续步骤失败，用户明确做过的选择也应被记住。
-    _persist_env_var(_INIT_PROVIDER_OPTION_ENV, chosen_option_key)
+    chosen_option_key = chosen_option.option_key
     env_vars_written = False
     main_key_persist_failed = False
     # 一级供应商若配置了二级菜单（Mimo/DeepSeek/Gemini），由 _PROVIDER_SUB_OPTIONS
@@ -1798,7 +1761,7 @@ def run_init_command(args: Namespace) -> int:
             _write_ollama_catalog_entries(config_dir, ollama)
         except ValueError as exc:
             print(f"\n❌ {exc}")
-            return 1
+            raise ValueError("provider 模型配置写入失败")
         print(f"✓ 已写入 Ollama 模型条目到 {config_dir / 'llm_models.json'}")
         _pkg_lane = _read_package_default_write_chapter_lane()
         _set_write_chapter_lane(
@@ -1815,7 +1778,7 @@ def run_init_command(args: Namespace) -> int:
             )
         except ValueError as exc:
             print(f"\n❌ {exc}")
-            return 1
+            raise ValueError("provider 模型配置写入失败")
         print(f"✓ 已写入自定义模型条目到 {config_dir / 'llm_models.json'}")
         if os.environ.get(effective_api_key_name) == custom.api_key_value:
             print(f"\n✓ {effective_api_key_name} 已在环境变量中配置，跳过写入。")
@@ -1860,20 +1823,131 @@ def run_init_command(args: Namespace) -> int:
             config_dir, _pkg_lane or 5, previous_default=_OLLAMA_DEFAULT_WRITE_CHAPTER_LANE,
         )
 
+    return ProviderSetupResult(
+        configured=not main_key_persist_failed,
+        non_thinking_model=sub_option.non_thinking_model if sub_option else chosen_option.non_thinking_model,
+        thinking_model=sub_option.thinking_model if sub_option else chosen_option.thinking_model,
+        env_vars_written=env_vars_written,
+    )
+
+
+def run_init_command(args: Namespace) -> int:
+    """执行 ``dayu-cli init`` 子命令。
+
+    Args:
+        args: 解析后的命令行参数，包含 ``base``（工作区目录）、
+            ``overwrite``（是否覆盖已有配置）与 ``reset``（是否先重置工作区状态）。
+
+    Returns:
+        退出码，0 表示成功。
+
+    Raises:
+        无。
+    """
+
+    base_dir = Path(args.base).resolve()
+    overwrite: bool = bool(getattr(args, "overwrite", False))
+    reset: bool = bool(getattr(args, "reset", False))
+    # --reset 删除的 .dayu/ / config/ / assets/ 与下面 _copy_config /
+    # _copy_assets / apply_all_workspace_migrations 操作的是同一批 workspace
+    # 产物；如果 reset 在锁外执行，另一个 dayu-cli init 进程仍可能在我们
+    # 删除 → 复制的中间窗口进入临界区，导致"我刚写进去你又删掉"或
+    # "迁移跑到一半目录被 reset 清空"的竞态。所以 reset 也必须在 advisory
+    # lock 之内。但 reset 之前的交互确认（input/y/N）应当在锁外完成，
+    # 避免长时间持锁阻塞其他 init 进程。
+    if reset:
+        if not _confirm_workspace_reset(base_dir):
+            print("已取消工作区重置。")
+            return 1
+
+    selected_provider = vars(args).get("provider")
+    provider_only = isinstance(selected_provider, str) and bool(selected_provider)
+    if provider_only and (reset or overwrite):
+        print("--provider 不可与 --reset 或 --overwrite 同用")
+        return 1
+    if provider_only and not (base_dir / "config" / "llm_models.json").is_file():
+        print("请先运行完整 init 创建工作区，再定向配置 provider")
+        return 1
+    is_first_workspace_init = reset or not (base_dir / "config").exists()
+    # 1. 复制配置 / assets 与跑工作区迁移属于 workspace 级临界区：双 init
+    # 并发会互相踩踏 SQLite 写事务、run.json 原子替换以及 config 目录复制。
+    # 用 advisory lock 排他独占。base_dir 在 `_resolve_workspace_root` 中
+    # 已确保存在，可直接落锁文件 `.dayu_init.lock`。
+    workspace_init_lock = StateDirSingleInstanceLock(
+        state_dir=base_dir,
+        lock_file_name=_INIT_WORKSPACE_LOCK_FILE_NAME,
+        lock_name=_INIT_WORKSPACE_LOCK_NAME,
+    )
+    if provider_only:
+        config_dir = base_dir / "config"
+    else:
+        base_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            workspace_init_lock.acquire()
+        except RuntimeError as exc:
+            print(f"\n❌ {exc}")
+            print("   同一 workspace 已有另一个 dayu-cli init 进程在运行，请等待其完成后重试。")
+            return 1
+        try:
+            if reset:
+                removed_targets = _reset_workspace_init_targets(base_dir)
+                if removed_targets:
+                    removed_names = "、".join(path.name for path in removed_targets)
+                    print(f"✓ 已重置工作区初始化目录: {removed_names}")
+                else:
+                    target_names = "、".join(
+                        path.name for path in _build_workspace_reset_targets(base_dir)
+                    )
+                    print(f"✓ 已执行工作区重置：未发现需要删除的 {target_names}")
+
+            config_dir = _copy_config(base_dir, overwrite=overwrite)
+            print(f"✓ 配置已复制到: {config_dir}")
+
+            # 1b. 复制 assets（定性分析模板等）
+            assets_dir = _copy_assets(base_dir, overwrite=overwrite)
+            print(f"✓ assets 已复制到: {assets_dir}")
+
+            # 1c. 对旧工作区应用一次性迁移（run.json、Host SQLite）。
+            # 具体规则集中在 dayu.cli.workspace_migrations，避免混入 init 常规流程。
+            apply_all_workspace_migrations(base_dir=base_dir, config_dir=config_dir)
+        finally:
+            workspace_init_lock.release()
+
+    # 2. 选择初始化模型方案 + 输入 API Key（已有则跳过）
+    chosen_option_key = str(selected_provider) if provider_only else _prompt_provider_selection()
+    chosen_option = _PROVIDER_OPTIONS_BY_KEY[chosen_option_key]
+    # 持久化用户选择，供下次 init 在共享 API Key 的多套方案间保留偏好；
+    # 即便当前 init 后续步骤失败，用户明确做过的选择也应被记住。
+    _persist_env_var(_INIT_PROVIDER_OPTION_ENV, chosen_option_key)
+    updated_count = 0
+    try:
+        if chosen_option.auth_mode == ProviderAuthMode.LOGIN:
+            from dayu.cli.chatgpt_setup import configure_chatgpt
+
+            with configure_chatgpt(config_dir, workspace_lock=workspace_init_lock) as (non_thinking, thinking):
+                updated_count = _update_manifest_default_models(config_dir, non_thinking, thinking)
+            setup = ProviderSetupResult(True, non_thinking, thinking)
+        else:
+            setup = _configure_api_provider(chosen_option, config_dir)
+    except httpx.HTTPError:
+        print("初始化网络请求失败，保留已有配置，请稍后重试")
+        return 1
+    except (ValueError, RuntimeError, OSError) as exc:
+        print(f"初始化失败：{exc}")
+        return 1
+    env_vars_written = setup.env_vars_written
+    main_key_persist_failed = not setup.configured
     # 3. 更新 manifest 默认模型（仅在主 key 持久化成功或已存在时执行）
     # 选定二级子型号时（Mimo/DeepSeek/Gemini），用其模型名覆盖 ProviderOption 中的占位键。
-    if sub_option is not None:
-        non_thinking = sub_option.non_thinking_model
-        thinking = sub_option.thinking_model
+    non_thinking, thinking = setup.non_thinking_model, setup.thinking_model
+    if not setup.configured:
+        print("\n⚠️  provider 认证配置未成功持久化，跳过 manifest 更新")
     else:
-        non_thinking = chosen_option.non_thinking_model
-        thinking = chosen_option.thinking_model
-    if main_key_persist_failed:
-        key_label = effective_api_key_name or "API Key"
-        print(f"\n⚠️  跳过 manifest 更新（{key_label} 未持久化）")
-    else:
-        updated_count = _update_manifest_default_models(config_dir, non_thinking, thinking)
+        if chosen_option.auth_mode != ProviderAuthMode.LOGIN:
+            updated_count = _update_manifest_default_models(config_dir, non_thinking, thinking)
         print(f"✓ 默认模型已设置为: {non_thinking} / {thinking}（更新了 {updated_count} 个 manifest）")
+    if provider_only:
+        return 0 if setup.configured else 1
 
     should_run_prewarm = _should_run_init_prewarm(
         is_first_workspace_init=is_first_workspace_init,

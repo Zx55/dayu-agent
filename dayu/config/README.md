@@ -209,6 +209,16 @@ Prompt 装配还遵循一条 Prefix Cache 导向的顺序约束：
 
 `stream_idle_timeout` 与 `stream_idle_heartbeat_sec` 是模型级 Runner 运行时覆盖项；Service / Host 在解析 scene 时会把它们写入 `runner_running_config` 快照，最终由 OpenAI 兼容 Runner 使用。
 
+### Responses 与账号凭据引用
+
+`runner_type: openai_responses` 使用原生 Responses 协议。包内 `llm_models.json` 提供 `chatgpt` 和 `chatgpt-thinking` 两个订阅模板，默认模型为 `gpt-6.1-sol`，推理档位分别为 `low` 和 `high`，默认窗口为 500000。认证配置只包含 `auth: {"type": "chatgpt", "account_ref": "chatgpt"}`。
+
+`init` 登录型流程通过配置加载器读取包内模板并复制为工作区条目，保留模板中的超时等字段。模型选择优先采用账号目录中与模板匹配的项，缺失时明确提示并允许选择其他可见模型。实际选择的模型、目录窗口或手动确认值，以及显式选择的 thinking 档位覆盖相应字段，窗口必须是确认过的正整数。scene 的默认与允许模型仍由 manifest 管理，用户可继续编辑工作区 JSON。重装程序包不会覆盖已有工作区模型配置，重新运行 `init --provider chatgpt` 才会从当前包模板重新生成该 provider 条目。
+
+协议与认证来源分离。手动配置 API key 的 Responses 条目可使用 `auth: {"type": "api_key", "api_key_env": "OPENAI_API_KEY"}`。配置仅存变量名或账号引用，不保存秘密。该 Runner 使用公共 OpenAI Responses endpoint，不是任意兼容代理入口。
+
+账号路径固定流式和 `store=false`，将内部 system 消息转为 developer，使用本地函数 namespace，不发送 `temperature` 或 `previous_response_id`。Responses 不要求 `runtime_hints.temperature_profiles`，scene 接受结果、展示模型与 Host 参数中的 temperature 为 `None`，显式 `--temperature` 也不生效。现有模型级 `stream_idle_timeout` 和 `run.json` 的工具超时继续生效。未声明的 extra payload 会报错，不会绕过协议限制。
+
 ### 4.2 CLI runner 状态
 
 CLI runner 已彻底禁用，不再允许通过 `llm_models.json` 配置或使用 `runner_type=cli`。
@@ -313,7 +323,7 @@ export MIMO_API_KEY="sk-xxxxxxxx"
 
 其中：
 - `max_context_tokens` 是 Runtime 计算 memory 预算的重要输入。
-- `runtime_hints.temperature_profiles` 是 scene temperature 的唯一真源。
+- 对 OpenAI 兼容 Runner，`runtime_hints.temperature_profiles` 是未显式覆盖时的 scene temperature 真源。
 - 如果模型不支持工具调用，就不能直接替换当前依赖 tool calling 的 scene。
 
 #### 第二步：把模型接入对应 scene manifest
@@ -391,7 +401,7 @@ Runtime 的选择规则是：
 - `supports_tool_calling` 与实际模型能力一致
 - `max_context_tokens` 填写正确
 - 目标 scene 的 `model.allowed_names` 已加入该模型
-- 目标 scene 的 `temperature_profile` 已在该模型的 `runtime_hints.temperature_profiles` 中配置
+- 使用 OpenAI 兼容 Runner 时，目标 scene 的 `temperature_profile` 已在该模型的 `runtime_hints.temperature_profiles` 中配置；Responses 无此要求
 - 如果要做多轮 `interactive`，已确认默认 memory 公式足够，或已补 `runtime_hints.conversation_memory`
 
 ## 5. `run.json`
@@ -681,7 +691,7 @@ scene manifest 当前有两类职责：
 固定约束：
 - 每个 scene manifest 都必须显式配置 `model.default_name`；缺失即视为 manifest 非法，`SceneExecutionResolver` 会直接拒绝当前 scene。
 - `model.allowed_names` 必须是非空数组，且 `model.default_name` 必须出现在 `allowed_names` 中。
-- `model.temperature_profile` 必须是非空字符串；真正 temperature 真源在 `llm_models.runtime_hints.temperature_profiles[temperature_profile].temperature`。
+- `model.temperature_profile` 必须是非空字符串。OpenAI 兼容 Runner 的默认 temperature 真源在 `llm_models.runtime_hints.temperature_profiles[temperature_profile].temperature`，Responses 不读取该 profile。
 - `runtime.agent.max_iterations` 为可选正整数；若配置，表示该 scene 的默认 Agent 迭代预算，并覆盖 `run.json` 的全局默认值；只有 CLI / request 级显式 `max_iterations` 可以再覆盖它。
 - `runtime.agent.max_consecutive_failed_tool_batches` 为可选正整数；若配置，表示该 scene 的默认连续失败工具批次上限。
 - `runtime.runner.tool_timeout_seconds` 为可选正数；若配置，表示该 scene 的默认 Runner 工具调用超时秒数，并覆盖 `run.json.runner_running_config.tool_timeout_seconds`。
@@ -689,8 +699,8 @@ scene manifest 当前有两类职责：
 - 对 `tool_selection.mode = none` 的无工具 scene，通常不需要声明 `runtime.runner.tool_timeout_seconds`；若也不需要特殊预算，整个 `runtime` 都可以省略。
 - CLI 的 `--model-name` 只有在显式传入时才覆盖普通 scene 的 `model.default_name`。
 - `write` 命令中的 `--audit-model-name` 只有在显式传入时才覆盖 `decision` / `audit` / `confirm` 的 `model.default_name`。
-- CLI 的 `--temperature` 只有在显式传入时才覆盖全部 scene 的 temperature；最终优先级为 `CLI --temperature > llm_models.runtime_hints.temperature_profiles[scene.temperature_profile].temperature`。
-- 若 profile 缺失 temperature，则运行直接报错，不再隐式使用顶层 `temperature`。
+- 对 OpenAI 兼容 Runner，CLI 的 `--temperature` 只有在显式传入时才覆盖 scene 的 temperature；最终优先级为 `CLI --temperature > llm_models.runtime_hints.temperature_profiles[scene.temperature_profile].temperature`。Responses 的生效温度始终为 `None`。
+- 对需要温度 profile 的 Runner，若没有显式覆盖且 profile 缺失 temperature，则运行直接报错，不再隐式使用顶层 `temperature`。
 - `regenerate` / `fix` / `repair` 的 `model.temperature_profile` 当前统一复用 `write`；scene 语义仍由各自的 `scenes/*.md` 契约区分，profile 只负责温度标定。
 - 当前包内默认中，`write` / `regenerate` / `fix` / `repair` / `confirm` / `decision` / `infer` 显式声明更高的 scene 预算；`audit` / `overview` 则复用 `run.json` 的全局默认值。
 

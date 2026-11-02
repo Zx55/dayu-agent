@@ -208,6 +208,12 @@ sequenceDiagram
 - `Service` 先把它们解释或收敛，再通过 `Execution Contract` 交给 `Host`
 - `prompting/` 在 `Host / Service` 侧完成 prompt 渲染，`Engine` 只消费最终可执行的 prompt 文本
 
+### 模型协议与认证装配
+
+`dayu.auth` 是内部凭据能力模块，负责账号注册、受保护存储及轮换刷新。CLI provider 初始化负责交互，Host 在最后装配点注入 `ModelCredentialProvider`，Engine 只消费运行时凭据。JSON 继续承载模型与认证引用，敏感凭据不进入执行契约或 Host 存储。
+
+Responses 是新增的 Runner 协议。它与现有 OpenAI 兼容 Runner 共用工具批次执行器，保留宿主约束下的 `LLM in the loop`，不引入 Codex runtime 或第二套会话真源。
+
 ## 3. 模块边界
 
 ### 3.1 UI

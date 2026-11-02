@@ -110,7 +110,7 @@ class CompanyFacetProfile:
         return merged
 
 
-def serialize_scene_models(scene_models: dict[str, "SceneModelConfig"]) -> dict[str, dict[str, float | str]]:
+def serialize_scene_models(scene_models: dict[str, "SceneModelConfig"]) -> dict[str, dict[str, float | str | None]]:
     """将 scene 模型配置映射转换为可序列化字典。
 
     Args:

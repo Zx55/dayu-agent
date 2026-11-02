@@ -52,6 +52,14 @@ class UserChatMessage(TypedDict):
     content: str
 
 
+class ModelContinuation(TypedDict):
+    """模型输出的运行态续接数据，Agent 仅负责生命周期。"""
+
+    identity: str
+    model: str
+    output: list[JsonValue]
+
+
 class AssistantChatMessage(TypedDict, total=False):
     """assistant role 消息。"""
 
@@ -59,6 +67,7 @@ class AssistantChatMessage(TypedDict, total=False):
     content: str | None
     tool_calls: list[ToolCallPayload]
     reasoning_content: str
+    model_continuation: ModelContinuation
 
 
 class ToolChatMessage(TypedDict, total=False):
