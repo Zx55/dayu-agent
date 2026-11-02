@@ -129,6 +129,8 @@ Responses 实现：
 - 可刷新 token 错误码由 `contracts.model_credentials` 统一声明，模型目录和 Responses Runner 共用分类。Runner 的输出前单次刷新边界保持不变，目录初始化独立执行其有界恢复，不参与工具执行或运行生命周期。
 - 刷新响应一旦完整返回，凭据提供器先同步校验并原子保存轮换结果，再等待客户端异步关闭，避免关闭阶段取消丢失新 token。刷新接口的 429/5xx 在解析 JSON 前按 HTTP 状态分类，HTML 或空错误响应同样可有限退避，永久 4xx 不按临时错误重试。
 
+网页非 HTML 文档的 Docling 转换由独立 spawn worker 执行，继续通过 `dayu.docling_runtime` 使用原有 OCR、表格与设备配置。父进程传递当前工具剩余总预算和取消令牌，结果通过私有临时目录原子发布。成功、异常、超时和取消都终止并回收 worker，SIGTERM 无效时升级强制终止。该边界仅属于网页文档转换，不改变 Agent 工具循环或财报仓储转换路径。
+
 历史残留实现：
 - `AsyncCliRunner`：已禁用，仅保留源码以便迁移旧实现，不允许再通过配置或 Host 主链路使用；已从 `dayu.engine` 包级公共导出移除，测试等内部使用方须通过 `dayu.engine.async_cli_runner` 直接导入
 

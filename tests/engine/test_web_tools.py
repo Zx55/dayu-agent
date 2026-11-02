@@ -8,6 +8,7 @@ from pathlib import Path
 from queue import Empty
 import socket
 import sys
+import time
 from types import ModuleType, SimpleNamespace
 from typing import Any, Optional, cast
 
@@ -1677,14 +1678,12 @@ def test_fetch_and_convert_content_pdf_docling_import_error(monkeypatch: pytest.
         AssertionError: 断言失败时抛出。
     """
 
-    original_import = builtins.__import__
+    def unavailable(raw_bytes: bytes, stream_name: str, *, timeout_seconds: float,
+                    cancellation_token: CancellationToken | None) -> tuple[str, str, str]:
+        """模拟 worker 初始化失败。参数为文档和预算，返回三元组，始终抛 RuntimeError。"""
+        raise RuntimeError("Docling 未安装")
 
-    def _fake_import(name: str, globals_: Any, locals_: Any, fromlist: tuple[str, ...], level: int) -> Any:
-        if name.startswith("docling"):
-            raise ImportError("docling missing")
-        return original_import(name, globals_, locals_, fromlist, level)
-
-    monkeypatch.setattr(builtins, "__import__", _fake_import)
+    monkeypatch.setattr("dayu.engine.tools.web_tools.convert_web_document_to_markdown", unavailable)
 
     fake_session = _FakeSession(
         get_handler=lambda _url, **_kwargs: _FakeHttpResponse(
@@ -1780,35 +1779,30 @@ def test_fetch_and_convert_content_pdf_convert_error(monkeypatch: pytest.MonkeyP
 
     def _raise_convert_failure(
         raw_bytes: bytes,
-        *,
         stream_name: str,
-        do_ocr: bool,
-        do_table_structure: bool,
-        table_mode: str,
-        do_cell_matching: bool,
-    ) -> _FakeConvertResult:
-        """模拟统一 Docling 运行时抛出转换失败。
+        *,
+        timeout_seconds: float,
+        cancellation_token: CancellationToken | None,
+    ) -> tuple[str, str, str]:
+        """模拟隔离转换器报告失败。
 
         Args:
             raw_bytes: 输入字节（占位）。
             stream_name: 流名称（占位）。
-            do_ocr: OCR 开关。
-            do_table_structure: 表格结构开关。
-            table_mode: 表格模式。
-            do_cell_matching: 单元格匹配开关。
+            timeout_seconds: 剩余预算。
+            cancellation_token: 工具取消信号。
 
         Returns:
             无。
 
         Raises:
-            ValueError: 固定抛出。
+            RuntimeError: 固定抛出。
         """
 
-        _ = (raw_bytes, stream_name, do_ocr, do_table_structure, table_mode, do_cell_matching)
-        raise ValueError("convert failed")
+        raise RuntimeError("Docling 转换失败: convert failed")
 
     monkeypatch.setattr(
-        "dayu.engine.tools.web_fetch_orchestrator.convert_pdf_bytes_with_docling",
+        "dayu.engine.tools.web_tools.convert_web_document_to_markdown",
         _raise_convert_failure,
     )
 
@@ -1817,11 +1811,13 @@ def test_fetch_and_convert_content_pdf_convert_error(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.unit
-def test_fetch_and_convert_content_pdf_success(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("total_budget", [None, 20.0])
+def test_fetch_and_convert_content_pdf_success(monkeypatch: pytest.MonkeyPatch, total_budget: float | None) -> None:
     """验证 PDF 仍走 Docling 成功路径。
 
     Args:
         monkeypatch: pytest monkeypatch fixture。
+        total_budget: 文档转换使用工具剩余预算，不被较短的 HTTP 超时截断。
 
     Returns:
         无。
@@ -1842,22 +1838,18 @@ def test_fetch_and_convert_content_pdf_success(monkeypatch: pytest.MonkeyPatch) 
 
     def _return_success(
         raw_bytes: bytes,
-        *,
         stream_name: str,
-        do_ocr: bool,
-        do_table_structure: bool,
-        table_mode: str,
-        do_cell_matching: bool,
-    ) -> _FakeConvertResult:
-        """模拟统一 Docling 运行时返回成功结果。
+        *,
+        timeout_seconds: float,
+        cancellation_token: CancellationToken | None,
+    ) -> tuple[str, str, str]:
+        """模拟隔离转换器返回结果，并验证工具预算被传递。
 
         Args:
             raw_bytes: 输入字节（占位）。
             stream_name: 流名称（占位）。
-            do_ocr: OCR 开关。
-            do_table_structure: 表格结构开关。
-            table_mode: 表格模式。
-            do_cell_matching: 单元格匹配开关。
+            timeout_seconds: 剩余预算。
+            cancellation_token: 工具取消信号。
 
         Returns:
             模拟转换结果。
@@ -1866,15 +1858,21 @@ def test_fetch_and_convert_content_pdf_success(monkeypatch: pytest.MonkeyPatch) 
             无。
         """
 
-        _ = (raw_bytes, stream_name, do_ocr, do_table_structure, table_mode, do_cell_matching)
-        return _FakeConvertResult("# My Title\n\nBody")
+        assert 0 < timeout_seconds <= (total_budget if total_budget is not None else 3)
+        if total_budget is not None:
+            assert timeout_seconds > 3
+        assert cancellation_token is None
+        return "My Title", "# My Title\n\nBody", "docling"
 
     monkeypatch.setattr(
-        "dayu.engine.tools.web_fetch_orchestrator.convert_pdf_bytes_with_docling",
+        "dayu.engine.tools.web_tools.convert_web_document_to_markdown",
         _return_success,
     )
 
-    result = _fetch_and_convert_content("https://example.com/report.pdf", timeout_seconds=3.0, session=fake_session)
+    result = _fetch_and_convert_content(
+        "https://example.com/report.pdf", timeout_seconds=3.0, session=fake_session,
+        timeout_budget=total_budget, deadline_monotonic=time.monotonic() + total_budget if total_budget is not None else None,
+    )
 
     assert result["title"] == "My Title"
     assert result["content"] == "# My Title\n\nBody"
@@ -1912,7 +1910,7 @@ def test_fetch_and_convert_content_plain_text_uses_docling(monkeypatch: pytest.M
     )
     monkeypatch.setattr(
         "dayu.engine.tools.web_tools._docling_convert_to_markdown",
-        lambda raw_bytes, stream_name: ("Plain Title", "# Plain Title\n\nPlain body", "docling"),
+        lambda raw_bytes, stream_name, **kwargs: ("Plain Title", "# Plain Title\n\nPlain body", "docling"),
     )
 
     result = _fetch_and_convert_content(

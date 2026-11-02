@@ -44,6 +44,7 @@ from dayu.engine.tool_contracts import ToolSchema, ToolTruncateSpec
 from dayu.engine.tool_errors import ToolBusinessError
 from dayu.engine.tool_registry import ToolRegistry
 from dayu.engine.tools.base import tool
+from dayu.engine.tools.web_document_backend import convert_web_document_to_markdown
 from dayu.engine.tools import web_fetch_orchestrator as _web_fetch_orchestrator
 from dayu.engine.tools import web_playwright_backend as _web_playwright_backend
 from dayu.engine.tools.web_challenge_detection import (
@@ -1116,7 +1117,7 @@ def _create_fetch_web_page_tool(
                     "response_excerpt": _extract_response_snippet(response),
                 },
             )
-        except requests.Timeout as exc:
+        except (requests.Timeout, TimeoutError) as exc:
             browser_result = _try_playwright_fallback(url=url, **playwright_fallback_kwargs)
             if browser_result is not None:
                 return browser_result
@@ -1403,20 +1404,29 @@ def _create_fetch_web_page_tool(
 
 
 
-def _docling_convert_to_markdown(raw_bytes: bytes, stream_name: str) -> tuple[str, str, str]:
+def _docling_convert_to_markdown(
+    raw_bytes: bytes, stream_name: str, *, timeout_seconds: float,
+    cancellation_token: CancellationToken | None,
+) -> tuple[str, str, str]:
     """使用 Docling 将非 HTML 原始字节转换为 Markdown。
 
     Args:
         raw_bytes: 页面原始内容字节。
         stream_name: 流名称，决定 Docling 解析模式（如 ``page.pdf``）。
+        timeout_seconds: 当前工具剩余预算。
+        cancellation_token: 当前工具取消令牌。
 
     Returns:
         ``(title, markdown, extraction_source)`` 三元组。
 
     Raises:
         RuntimeError: Docling 未安装或转换失败时抛出。
+        TimeoutError: 转换预算耗尽。
+        CancelledError: 工具已取消。
     """
-    title, markdown, extraction_source = _web_fetch_orchestrator._docling_convert_to_markdown(raw_bytes, stream_name)
+    title, markdown, extraction_source = convert_web_document_to_markdown(
+        raw_bytes, stream_name, timeout_seconds=timeout_seconds, cancellation_token=cancellation_token,
+    )
     if not title:
         title = _extract_first_markdown_heading(markdown)
     return title, markdown, extraction_source

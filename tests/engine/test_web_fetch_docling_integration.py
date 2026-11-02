@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from dayu.engine.tools.web_fetch_orchestrator import _docling_convert_to_markdown
+from dayu.engine.tools.web_document_backend import convert_web_document_to_markdown
 
 pytestmark = pytest.mark.integration
 
@@ -49,7 +49,9 @@ def test_docling_convert_to_markdown_reads_real_pdf_bytes() -> None:
     """
 
     pdf_bytes = _fixture_pdf_path().read_bytes()
-    title, markdown, extraction_source = _docling_convert_to_markdown(pdf_bytes, "page.pdf")
+    title, markdown, extraction_source = convert_web_document_to_markdown(
+        pdf_bytes, "page.pdf", timeout_seconds=90, cancellation_token=None,
+    )
 
     assert extraction_source == "docling"
     assert title == "Dayu Docling Integration Fixture"
