@@ -11,6 +11,8 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from dayu.contracts.agent_types import JsonValue
+from dayu.engine.tool_batch_executor import ToolCall, ToolCallResult
 
 from dayu.contracts.agent_types import AgentMessage
 from dayu.contracts.protocols import ToolExecutionContext
@@ -353,7 +355,7 @@ def test_constructor_tool_timeout_seconds_priority():
         temperature=0.7,
         running_config=running_config,
     )
-    assert runner.tool_timeout_seconds == 90.0
+    assert runner._tool_batch.timeout == 90.0
     
     runner_2 = aor.AsyncOpenAIRunner(
         endpoint_url="http://example.com",
@@ -470,11 +472,11 @@ def test_n_parameter_force_override_to_one():
 async def test_run_tool_call_context_timeout_prefers_tool_timeout_seconds():
     """验证工具执行上下文中的 timeout 使用 tool_timeout_seconds。"""
     runner = _make_runner()
-    runner.tool_timeout_seconds = 12.5
+    runner._tool_batch.timeout = 12.5
     executor = _ContextCaptureExecutor()
     runner.set_tools(executor)
 
-    result = await runner._run_tool_call(
+    result = await runner._tool_batch.execute_one(
         {
             "id": "call_1",
             "name": "demo_tool",
@@ -520,11 +522,11 @@ async def test_run_tool_call_timeout_marks_cooperative_tool_as_not_continuing() 
                 time.sleep(0.002)
 
     runner = _make_runner()
-    runner.tool_timeout_seconds = 0.01
+    runner._tool_batch.timeout = 0.01
     executor = _CooperativeExecutor()
     runner.set_tools(executor)
 
-    result = await runner._run_tool_call(
+    result = await runner._tool_batch.execute_one(
         {
             "id": "call_1",
             "name": "demo_tool",
@@ -536,8 +538,8 @@ async def test_run_tool_call_timeout_marks_cooperative_tool_as_not_continuing() 
     )
 
     assert result["result"]["error"] == "tool_execution_timeout"
-    assert result["result"]["meta"]["execution_may_continue"] is False
-    assert "orphan_thread_warning" not in result["result"]["meta"]
+    assert _result_meta(result)["execution_may_continue"] is False
+    assert "orphan_thread_warning" not in _result_meta(result)
 
     await asyncio.sleep(0.05)
     assert executor.context is not None
@@ -561,10 +563,10 @@ async def test_run_tool_call_timeout_marks_soft_timeout_even_if_thread_finishes_
             return {"ok": True, "value": "late"}
 
     runner = _make_runner()
-    runner.tool_timeout_seconds = 0.01
+    runner._tool_batch.timeout = 0.01
     runner.set_tools(_SlowExecutor())
 
-    result = await runner._run_tool_call(
+    result = await runner._tool_batch.execute_one(
         {
             "id": "call_1",
             "name": "demo_tool",
@@ -576,7 +578,14 @@ async def test_run_tool_call_timeout_marks_soft_timeout_even_if_thread_finishes_
     )
 
     assert result["result"]["error"] == "tool_execution_timeout"
-    assert result["result"]["meta"]["execution_may_continue"] is True
+    assert _result_meta(result)["execution_may_continue"] is True
     assert side_effects == []
 
     assert _wait_until(lambda: side_effects == ["demo_tool:{'k': 'v'}"], timeout_seconds=1.0)
+
+
+def _result_meta(result: ToolCallResult) -> dict[str, JsonValue]:
+    """校验测试观测到的结果元数据。"""
+    meta = result["result"].get("meta")
+    assert isinstance(meta, dict)
+    return meta

@@ -77,6 +77,12 @@ lane 合并顺序（后者覆盖前者）：
 
 ---
 
+### 模型凭据装配
+
+Host 的 Agent builder 根据纯模型配置装配凭据提供器，再将其注入 Runner 工厂。Responses 执行参数与 pending turn 快照只携带认证类型和连接引用，不包含 access/refresh token。凭据更新由独立 `dayu.auth` 叶子模块完成，Host 不实现 OAuth 或直接调用模型。
+
+续接状态只在运行态消息中存在，不新增 Host SQLite schema。进程内 replay 可复用消息上的完整模型状态，跨进程恢复沿用 pending turn 的用户轮重建语义。认证失效作为终止错误传播，不能生成看似成功的降级回答。
+
 ## 4. Session 状态机
 
 ```

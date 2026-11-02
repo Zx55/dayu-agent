@@ -270,12 +270,12 @@ def _validate_override_keys(
 def resolve_scene_temperature(
     *,
     resolved_temperature: float | None,
-    model_config: Mapping[str, Any],
+    model_config: ModelConfig,
     temperature_profile: str,
     scene_name: str,
     model_name: str,
-) -> float:
-    """按统一规则解析 scene 最终 temperature。
+) -> float | None:
+    """按模型协议及统一覆盖规则解析 scene 的生效 temperature。
 
     Args:
         resolved_temperature: 已经过请求级覆盖与基础配置合并后的显式 temperature。
@@ -285,12 +285,16 @@ def resolve_scene_temperature(
         model_name: 当前模型名，仅用于错误提示。
 
     Returns:
-        当前 scene 最终生效的 temperature。
+        当前 scene 最终生效的 temperature；Responses 不适用时为 None。
 
     Raises:
         ValueError: 当模型配置缺少 temperature profile 或 temperature 非法时抛出。
     """
 
+    # Responses 不发送温度参数。必须在读取 profile 或显式覆盖前收敛为空，
+    # 避免 init 生成的有效配置被其他协议的温度约束拦截。
+    if normalize_runner_type(model_config.get("runner_type")) == RunnerType.OPENAI_RESPONSES:
+        return None
     if resolved_temperature is not None:
         # 防御性兜底：``normalize_temperature`` 在输入为空白字符串时会返回 ``None``；
         # 当前外层已过滤 ``None``，但不过滤空串。这里显式 ``or 0.0`` 保证返回严格 float，
@@ -1239,7 +1243,7 @@ def apply_model_runner_runtime_overrides(
     """
 
     runner_type = normalize_runner_type(model_config.get("runner_type"))
-    if runner_type != RunnerType.OPENAI_COMPATIBLE:
+    if runner_type not in {RunnerType.OPENAI_COMPATIBLE, RunnerType.OPENAI_RESPONSES}:
         return resolved_execution_options
     runner_running_config = resolved_execution_options.runner_running_config
     if not isinstance(runner_running_config, OpenAIRunnerRuntimeConfig):

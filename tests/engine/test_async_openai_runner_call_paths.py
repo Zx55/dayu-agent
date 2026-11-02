@@ -1027,7 +1027,7 @@ async def test_run_tool_call_cancelled_and_constructor(monkeypatch: pytest.Monke
         raise asyncio.CancelledError()
 
     monkeypatch.setattr(aor.asyncio, "to_thread", _fake_to_thread)
-    result = await runner._run_tool_call(
+    result = await runner._tool_batch.execute_one(
         {"id": "t1", "name": "tool", "arguments": {}, "index_in_iteration": 0},
         "req1",
         {"run_id": "r", "iteration_id": "t", "request_id": "q"},

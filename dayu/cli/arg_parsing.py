@@ -687,6 +687,7 @@ def _create_parser() -> argparse.ArgumentParser:
         default="./workspace",
         help="工作区根目录（默认 ./workspace）",
     )
+    init_parser.add_argument("--provider", choices=["chatgpt", "mimo", "deepseek", "openai", "anthropic", "gemini", "qwen", "ollama", "custom_openai"], help="仅重新配置已有工作区的指定模型方案")
     _add_reset_arg(
         init_parser,
         help_text="删除工作区下的 .dayu、config、assets 后重新初始化",

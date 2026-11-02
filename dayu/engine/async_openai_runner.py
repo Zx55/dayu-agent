@@ -97,7 +97,7 @@ import json
 import time
 import uuid
 from types import ModuleType
-from typing import AsyncIterator, Dict, List, Optional, Any, TYPE_CHECKING
+from typing import cast, AsyncIterator, Dict, List, Optional, Any, TYPE_CHECKING
 from dataclasses import dataclass
 
 from dayu.contracts.agent_types import AgentMessage
@@ -123,6 +123,7 @@ from .events import (
 from .xml_extractor import extract_full
 from .reasoning_protocol import resolve_reasoning_protocol
 from .protocols import ToolExecutor
+from .tool_batch_executor import ToolBatchExecutor, ToolCall
 from dayu.log import Log
 from .tool_result import (
     build_error,
@@ -564,6 +565,7 @@ class AsyncOpenAIRunner:
         self.running_config = running_config
         self.tool_timeout_seconds = self.running_config.tool_timeout_seconds
         self.stream_idle_timeout = self.running_config.stream_idle_timeout
+        self._tool_batch = ToolBatchExecutor(None, timeout=self.tool_timeout_seconds, cancellation_token=cancellation_token)
         self.stream_idle_heartbeat_sec = self.running_config.stream_idle_heartbeat_sec
         Log.verbose(
             "Runner 配置: "
@@ -641,53 +643,6 @@ class AsyncOpenAIRunner:
             return
         await session.close()
 
-    def _build_tool_execution_context(
-        self,
-        *,
-        tool_call: Dict[str, Any],
-        trace_meta: Dict[str, Any],
-        cancellation_token: CancellationToken | None = None,
-    ) -> ToolExecutionContext:
-        """构造单次 tool call 的强类型执行上下文。
-
-        Args:
-            tool_call: 当前工具调用数据。
-            trace_meta: 当前 trace 元数据。
-            cancellation_token: 当前 tool call 绑定的取消令牌；为空时内部创建。
-
-        Returns:
-            规整后的工具执行上下文。
-
-        Raises:
-            无。
-        """
-
-        linked_token = cancellation_token
-        if linked_token is None:
-            if self.cancellation_token is not None:
-                linked_token = CancellationToken.create_linked(self.cancellation_token)
-            else:
-                linked_token = CancellationToken()
-        return ToolExecutionContext(
-            run_id=str(trace_meta.get("run_id") or "").strip() or None,
-            iteration_id=str(trace_meta.get("iteration_id") or "").strip() or None,
-            tool_call_id=str(tool_call.get("id") or "").strip() or None,
-            index_in_iteration=int(tool_call.get("index_in_iteration") or 0),
-            timeout_seconds=self.tool_timeout_seconds,
-            cancellation_token=linked_token,
-        )
-
-    def _tool_supports_execution_context(self, tool_name: str) -> bool:
-        """判断指定工具是否已显式声明 execution context 注入。"""
-
-        executor = self._tool_executor
-        if executor is None:
-            return False
-        getter = getattr(executor, "get_execution_context_param_name", None)
-        if not callable(getter):
-            return False
-        return bool(getter(tool_name))
-
     def set_default_extra_payloads(self, payloads: Dict[str, Any]) -> None:
         """
         设置实例级默认请求参数。
@@ -720,6 +675,7 @@ class AsyncOpenAIRunner:
             None
         """
         self._tool_executor = executor
+        self._tool_batch.executor = executor
 
     def is_supports_tool_calling(self) -> bool:
         """
@@ -732,259 +688,6 @@ class AsyncOpenAIRunner:
             是否支持工具调用。
         """
         return self.supports_tool_calling
-
-    async def _run_tool_call(
-        self,
-        tool_call: Dict[str, Any],
-        request_id: str,
-        trace_meta: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """
-        执行单个工具调用（支持并发与超时）。
-
-        Args:
-            tool_call: 标准化的工具调用数据。
-
-        Returns:
-            包含工具调用与结构化结果的字典。
-        """
-        start_time = time.monotonic()
-        log_prefix = f"[{self.name}][{request_id}]"
-        Log.debug(
-            f"{log_prefix} ▶ {tool_call['name']}({_compact_args(tool_call['arguments'])}) "
-            f"[id={tool_call.get('id')}, index={tool_call.get('index_in_iteration')}]",
-            module=MODULE,
-        )
-        tool_cancellation_token = (
-            CancellationToken.create_linked(self.cancellation_token)
-            if self.cancellation_token is not None
-            else CancellationToken()
-        )
-        try:
-            tool_executor = _require_tool_executor(self._tool_executor)
-            context = self._build_tool_execution_context(
-                tool_call=tool_call,
-                trace_meta=trace_meta,
-                cancellation_token=tool_cancellation_token,
-            )
-            exec_coro = asyncio.to_thread(
-                tool_executor.execute,
-                name=tool_call["name"],
-                arguments=tool_call["arguments"],
-                context=context,
-            )
-            if self.tool_timeout_seconds is not None:
-                tool_result = await asyncio.wait_for(exec_coro, timeout=self.tool_timeout_seconds)
-            else:
-                tool_result = await exec_coro
-        except asyncio.TimeoutError:
-            tool_cancellation_token.cancel()
-            supports_execution_context = self._tool_supports_execution_context(tool_call["name"])
-            timeout_meta: dict[str, Any] = {
-                "execution_may_continue": not supports_execution_context,
-            }
-            timeout_hint = "tool execution timed out and cancellation was requested"
-            timeout_log_suffix = "已触发协作式取消"
-            if not supports_execution_context:
-                timeout_meta["orphan_thread_warning"] = True
-                timeout_hint = "tool execution may still be running; do not blindly retry"
-                timeout_log_suffix = "后台线程可能仍在运行"
-            tool_result = build_error(
-                "tool_execution_timeout",
-                "tool execution timeout",
-                hint=timeout_hint,
-                meta=timeout_meta,
-            )
-            Log.warn(
-                f"{log_prefix} ⚠ 工具 {tool_call['name']} 执行超时（{self.tool_timeout_seconds}s），{timeout_log_suffix}",
-                module=MODULE,
-            )
-        except asyncio.CancelledError:
-            tool_cancellation_token.cancel()
-            tool_result = build_error("cancelled", "tool execution cancelled")
-        except Exception as exc:
-            tool_result = build_error("execution_error", str(exc))
-        latency_ms = int((time.monotonic() - start_time) * 1000)
-        contract_error = validate_tool_result_contract(tool_result)
-        if contract_error is not None:
-            tool_result = build_error(
-                "invalid_result",
-                contract_error,
-                hint=str(tool_result),
-            )
-
-        meta = tool_result.get("meta")
-        if not isinstance(meta, dict):
-            meta = {}
-        meta["tool"] = tool_call["name"]
-        meta["latency_ms"] = latency_ms
-        tool_result["meta"] = meta
-        success = is_tool_success(tool_result)
-        summary = _result_summary(tool_result)
-        if success:
-            # 仅在成功时计算响应体积，用于日志显示
-            result_size = len(json.dumps(tool_result, ensure_ascii=False, default=str))
-            Log.debug(
-                f"{log_prefix} ✅ {tool_call['name']} → {summary} ({latency_ms}ms, {result_size}c)",
-                module=MODULE,
-            )
-        else:
-            Log.debug(
-                f"{log_prefix} ❌ {tool_call['name']} → {summary} ({latency_ms}ms)",
-                module=MODULE,
-            )
-        ret = {
-            "id": tool_call["id"],
-            "name": tool_call["name"],
-            "arguments": tool_call["arguments"],
-            "index_in_iteration": tool_call["index_in_iteration"],
-            "result": tool_result,
-        }
-        tc_extra = tool_call.get("extra_content")
-        if tc_extra is not None:
-            ret["extra_content"] = tc_extra
-        return ret
-
-    async def _emit_tool_batch(
-        self,
-        tool_calls: List[Dict[str, Any]],
-        request_id: str,
-        trace_meta: Dict[str, Any],
-    ) -> AsyncIterator[StreamEvent]:
-        """
-        发起并等待一批工具调用，按顺序产出事件（不做参数校验，依赖上游保证完整性）。
-
-        Args:
-            tool_calls: 工具调用列表。
-
-        Returns:
-            事件异步迭代器。
-        """
-        log_prefix = f"[{self.name}][{request_id}]"
-        if not tool_calls:
-            Log.debug(f"{log_prefix} 未检测到工具调用，跳过执行", module=MODULE)
-            return
-        if not self._tool_executor:
-            Log.error(
-                f"{log_prefix} 收到工具调用但未设置工具执行器，无法执行"
-                f"（error_type=tool_executor_missing）",
-                module=MODULE,
-            )
-            yield self._annotate_event(error_event(
-                "tool_calls received but tool executor is not set",
-                recoverable=False,
-                error_type="tool_executor_missing",
-            ), trace_meta)
-            return
-
-        ordered_calls = sorted(tool_calls, key=lambda tc: tc["index_in_iteration"])
-        # Log.debug(f"{log_prefix} 准备执行 {len(ordered_calls)} 个工具调用", module=MODULE)
-        call_ids = [tc["id"] for tc in ordered_calls]
-
-        for tc in ordered_calls:
-            display_name, summary_params = (
-                self._tool_executor.get_tool_display_info(tc["name"])
-                if self._tool_executor else (tc["name"], None)
-            )
-            event = tool_call_dispatched(         # ← 工具调用已发起事件
-                tool_call_id=tc["id"],
-                name=tc["name"],
-                arguments=tc["arguments"],
-                index_in_iteration=tc["index_in_iteration"],
-                display_name=display_name,
-                summary_params=summary_params,
-            )
-            tc_extra = tc.get("extra_content")
-            if tc_extra is not None:
-                event.metadata["extra_content"] = tc_extra
-            yield self._annotate_event(event, trace_meta)
-
-        yield self._annotate_event(tool_calls_batch_ready(call_ids), trace_meta)  # ← 批次工具调用就绪事件
-
-        tasks = [
-            asyncio.create_task(self._run_tool_call(tc, request_id, trace_meta))
-            for tc in ordered_calls
-        ]
-        if not tasks:
-            results: list[Dict[str, Any]] = []
-        else:
-            # 取消信号到达时，立刻取消未完成的工具任务并退出，
-            # 不再等待 tool_timeout_seconds 触发逐个工具的超时回收。
-            waiter, unregister_waiter = _create_cancellation_waiter(self.cancellation_token)
-            try:
-                if waiter is None:
-                    results = await asyncio.gather(*tasks)
-                else:
-                    gather_task = asyncio.ensure_future(asyncio.gather(*tasks))
-                    try:
-                        done, _pending = await asyncio.wait(
-                            {gather_task, waiter},
-                            return_when=asyncio.FIRST_COMPLETED,
-                        )
-                        if (
-                            waiter in done
-                            and self.cancellation_token is not None
-                            and self.cancellation_token.is_cancelled()
-                            and not gather_task.done()
-                        ):
-                            for task in tasks:
-                                if not task.done():
-                                    task.cancel()
-                            await cancel_task_and_wait(gather_task)
-                            Log.info(
-                                f"{log_prefix} 工具批次因取消信号提前中止: {len(ordered_calls)} 个待完成",
-                                module=MODULE,
-                            )
-                            raise EngineCancelledError("tool batch cancelled")
-                        results = await gather_task
-                    except asyncio.CancelledError:
-                        await cancel_task_and_wait(gather_task)
-                        raise
-            finally:
-                if unregister_waiter is not None:
-                    unregister_waiter()
-                if waiter is not None and not waiter.done():
-                    waiter.cancel()
-
-        counts = {"ok": 0, "error": 0, "timeout": 0, "cancelled": 0}
-        for result in results:
-            tool_result = result["result"]
-            success = is_tool_success(tool_result)
-            if success:
-                counts["ok"] += 1
-            else:
-                code = get_error_code(tool_result)
-                if code == "tool_execution_timeout":
-                    counts["timeout"] += 1
-                elif code == "cancelled":
-                    counts["cancelled"] += 1
-                else:
-                    counts["error"] += 1
-            result_display_name, _ = (
-                self._tool_executor.get_tool_display_info(result["name"])
-                if self._tool_executor else (result["name"], None)
-            )
-            event = tool_call_result(             # ← 工具调用结果事件
-                tool_call_id=result["id"],
-                name=result["name"],
-                arguments=result["arguments"],
-                index_in_iteration=result["index_in_iteration"],
-                result=result["result"],
-                display_name=result_display_name,
-            )
-            tc_extra = result.get("extra_content")
-            if tc_extra is not None:
-                event.data["extra_content"] = tc_extra
-            yield self._annotate_event(event, trace_meta)
-
-        event = tool_calls_batch_done(            # ← 工具调用批次完成事件
-            call_ids,
-            ok=counts["ok"],
-            error=counts["error"],
-            timeout=counts["timeout"],
-            cancelled=counts["cancelled"],
-        )
-        yield self._annotate_event(event, trace_meta)
 
     async def call(
         self,
@@ -1018,6 +721,7 @@ class AsyncOpenAIRunner:
             source="extra_payloads",
             reserved_keys=_RESERVED_EXTRA_PAYLOAD_KEYS,
         )
+        messages = [cast(AgentMessage, {key: value for key, value in message.items() if key != "model_continuation"}) for message in messages]
         request_id = f"req_{uuid.uuid4().hex[:8]}"
         trace_context = extra_payloads.pop("trace_context", None)
         if not isinstance(trace_context, dict):
@@ -1517,7 +1221,7 @@ class AsyncOpenAIRunner:
                 module=MODULE,
             )
 
-            async for event in self._emit_tool_batch(result.tool_calls, request_id, trace_meta):
+            async for event in self._tool_batch.execute_batch(cast(list[ToolCall], result.tool_calls), request_id, trace_meta):
                 yield event
                 if event.type == EventType.ERROR:
                     return
@@ -1788,7 +1492,7 @@ class AsyncOpenAIRunner:
 
                 tool_call_batch.append(item)
 
-            async for event in self._emit_tool_batch(tool_call_batch, request_id, trace_meta):
+            async for event in self._tool_batch.execute_batch(cast(list[ToolCall], tool_call_batch), request_id, trace_meta):
                 yield event
                 if event.type == EventType.ERROR:
                     return

@@ -23,11 +23,11 @@ class SceneModelConfig:
 
     Attributes:
         name: 生效模型名。
-        temperature: 生效 temperature。
+        temperature: 生效 temperature；协议不适用时为 None。
     """
 
     name: str
-    temperature: float
+    temperature: float | None
 
 
 @dataclass

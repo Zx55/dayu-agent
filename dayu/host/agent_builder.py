@@ -13,12 +13,15 @@ from dayu.contracts.model_config import (
     OpenAICompatibleModelConfig,
     OpenAICompatibleRunnerParams,
     RunnerType,
+    ResponsesModelConfig,
+    ResponsesRunnerParams,
     ensure_runner_type_enabled,
 )
 from dayu.engine.async_agent import AgentRunningConfig, AsyncAgent
 from dayu.contracts.cancellation import CancellationToken
 from dayu.engine.protocols import AsyncRunner, ToolExecutor
 from dayu.engine.runner_factory import create_runner
+from dayu.auth.credentials import build_credential_provider
 from dayu.engine.tool_trace import ToolTraceRecorderFactory
 from dayu.execution.runtime_config import (
     FallbackMode,
@@ -47,6 +50,9 @@ def build_async_runner(
         ValueError: ``runner_type`` 不支持时抛出。
     """
 
+    if agent_create_args.runner_type == RunnerType.OPENAI_RESPONSES:
+        params = cast(ResponsesRunnerParams, agent_create_args.runner_params)
+        return create_runner(agent_create_args, cancellation_token=cancellation_token, credentials=build_credential_provider(params.get("auth", {})))
     return create_runner(agent_create_args, cancellation_token=cancellation_token)
 
 
@@ -146,9 +152,19 @@ def _build_runner_params(
     model_name: str,
     temperature: float | None,
     model_config: ModelConfig,
-) -> OpenAICompatibleRunnerParams | CliRunnerParams:
+) -> OpenAICompatibleRunnerParams | CliRunnerParams | ResponsesRunnerParams:
     """构造 runner 专属参数。"""
 
+    if runner_type == RunnerType.OPENAI_RESPONSES:
+        responses = cast(ResponsesModelConfig, model_config)
+        if not responses.get("model") or not responses.get("auth"):
+            raise ValueError("Responses 配置缺少 model 或 auth")
+        return ResponsesRunnerParams(
+            model=responses.get("model", ""), auth=responses.get("auth", {}),
+            reasoning_effort=responses.get("reasoning_effort", "medium"),
+            timeout=float(responses.get("timeout", 3600)),
+            max_retries=responses.get("max_retries", 2),
+        )
     if runner_type == RunnerType.OPENAI_COMPATIBLE:
         openai_model_config = cast(OpenAICompatibleModelConfig, model_config)
         endpoint_url = openai_model_config.get("endpoint_url")

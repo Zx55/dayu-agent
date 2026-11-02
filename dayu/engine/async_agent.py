@@ -35,6 +35,7 @@ from dataclasses import dataclass
 
 from dayu.contracts.agent_types import (
     AgentMessage,
+    ModelContinuation,
     AgentTraceIdentity,
     ToolCallPayload,
     build_assistant_chat_message,
@@ -714,6 +715,7 @@ class AsyncAgent:
             content_complete_seen = False
             content_complete_text: Optional[str] = None
             reasoning_content: Optional[str] = None
+            model_continuation: ModelContinuation | None = None
             done_event_seen = False
             done_event_summary: Dict[str, Any] = {}
             tool_calls_batch_done_seen = False
@@ -839,6 +841,7 @@ class AsyncAgent:
                     content_complete_seen = True
                     content_complete_text = event.data
                     # 提取 reasoning_content（thinking 模式下由 Runner 通过 metadata 传递）
+                    model_continuation = cast(ModelContinuation | None, event.metadata.pop("model_continuation", None))
                     rc = event.metadata.get("reasoning_content") if event.metadata else None
                     if rc:
                         reasoning_content = rc
@@ -1015,6 +1018,8 @@ class AsyncAgent:
                         tool_calls=tool_calls_payload,
                         reasoning_content=reasoning_content,
                     )
+                if model_continuation is not None:
+                    assistant_message["model_continuation"] = model_continuation
                 messages.append(assistant_message)
                 
                 # Pass 1: 序列化所有工具结果
@@ -1179,7 +1184,10 @@ class AsyncAgent:
                         accumulated_content_parts.append(final_content)
                     # 将截断的部分内容作为 assistant message
                     if final_content:
-                        messages.append(build_assistant_chat_message(content=final_content))
+                        partial_message = build_assistant_chat_message(content=final_content)
+                        if model_continuation is not None:
+                            partial_message["model_continuation"] = model_continuation
+                        messages.append(partial_message)
                     messages.append(
                         build_user_chat_message(
                             self.running_config.continuation_prompt or DEFAULT_CONTINUATION_PROMPT
@@ -1424,6 +1432,7 @@ class AsyncAgent:
                 **call_payloads,
             ):
                 if event.type == EventType.CONTENT_COMPLETE:
+                    event.metadata.pop("model_continuation", None)
                     content_complete_seen = True
                     content_complete_text = event.data
                     yield self._annotate_event(event, run_id=run_id, iteration_id=iteration_id)

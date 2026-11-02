@@ -5,6 +5,8 @@ import asyncio
 from typing import Any, cast
 
 import pytest
+from dayu.contracts.agent_types import JsonValue
+from dayu.engine.tool_batch_executor import ToolCall, ToolCallResult
 
 from dayu.contracts.protocols import ToolExecutor
 from dayu.engine import async_openai_runner as aor
@@ -58,17 +60,17 @@ async def test_run_tool_call_success():
     runner = _make_runner()
     runner.set_tools(_DummyExecutor({"ok": True, "value": "ok"}))
 
-    tool_call = {
+    tool_call: ToolCall = {
         "id": "t1",
         "name": "echo",
         "arguments": {"x": 1},
         "index_in_iteration": 0,
     }
 
-    result = await runner._run_tool_call(tool_call, "req1", {"run_id": "r", "iteration_id": "t"})
+    result = await runner._tool_batch.execute_one(tool_call, "req1", {"run_id": "r", "iteration_id": "t"})
     assert result["result"]["ok"] is True
     assert result["result"]["value"] == "ok"
-    assert result["result"]["meta"]["tool"] == "echo"
+    assert _result_meta(result)["tool"] == "echo"
 
 
 @pytest.mark.asyncio
@@ -76,14 +78,14 @@ async def test_run_tool_call_failure():
     runner = _make_runner()
     runner.set_tools(_DummyExecutor(RuntimeError("boom")))
 
-    tool_call = {
+    tool_call: ToolCall = {
         "id": "t1",
         "name": "echo",
         "arguments": {"x": 1},
         "index_in_iteration": 0,
     }
 
-    result = await runner._run_tool_call(tool_call, "req1", {"run_id": "r", "iteration_id": "t"})
+    result = await runner._tool_batch.execute_one(tool_call, "req1", {"run_id": "r", "iteration_id": "t"})
     assert result["result"]["ok"] is False
     assert result["result"]["error"] == "execution_error"
 
@@ -93,14 +95,14 @@ async def test_run_tool_call_invalid_result():
     runner = _make_runner()
     runner.set_tools(_DummyExecutor("not_dict"))
 
-    tool_call = {
+    tool_call: ToolCall = {
         "id": "t1",
         "name": "echo",
         "arguments": {"x": 1},
         "index_in_iteration": 0,
     }
 
-    result = await runner._run_tool_call(tool_call, "req1", {"run_id": "r", "iteration_id": "t"})
+    result = await runner._tool_batch.execute_one(tool_call, "req1", {"run_id": "r", "iteration_id": "t"})
     assert result["result"]["ok"] is False
     assert result["result"]["error"] == "invalid_result"
 
@@ -110,14 +112,14 @@ async def test_run_tool_call_legacy_result_rejected():
     runner = _make_runner()
     runner.set_tools(_DummyExecutor({"success": True, "data": {"type": "text", "value": "ok"}}))
 
-    tool_call = {
+    tool_call: ToolCall = {
         "id": "t1",
         "name": "echo",
         "arguments": {"x": 1},
         "index_in_iteration": 0,
     }
 
-    result = await runner._run_tool_call(tool_call, "req1", {"run_id": "r", "iteration_id": "t"})
+    result = await runner._tool_batch.execute_one(tool_call, "req1", {"run_id": "r", "iteration_id": "t"})
     assert result["result"]["ok"] is False
     assert result["result"]["error"] == "invalid_result"
 
@@ -127,18 +129,18 @@ async def test_run_tool_call_invalid_error_and_none_data():
     runner = _make_runner()
     runner.set_tools(_DummyExecutor({"ok": False, "error": "bad", "message": ""}))
 
-    tool_call = {
+    tool_call: ToolCall = {
         "id": "t1",
         "name": "echo",
         "arguments": {"x": 1},
         "index_in_iteration": 0,
     }
 
-    result = await runner._run_tool_call(tool_call, "req1", {"run_id": "r", "iteration_id": "t"})
+    result = await runner._tool_batch.execute_one(tool_call, "req1", {"run_id": "r", "iteration_id": "t"})
     assert result["result"]["error"] == "invalid_result"
 
     runner.set_tools(_DummyExecutor({"ok": True, "value": None}))
-    result = await runner._run_tool_call(tool_call, "req1", {"run_id": "r", "iteration_id": "t"})
+    result = await runner._tool_batch.execute_one(tool_call, "req1", {"run_id": "r", "iteration_id": "t"})
     assert result["result"]["value"] is None
 
 
@@ -147,25 +149,25 @@ async def test_run_tool_call_wraps_bytes_and_tuple():
     runner = _make_runner()
     runner.set_tools(_DummyExecutor({"ok": True, "value": b"abc"}))
 
-    tool_call = {
+    tool_call: ToolCall = {
         "id": "t1",
         "name": "echo",
         "arguments": {"x": 1},
         "index_in_iteration": 0,
     }
 
-    result = await runner._run_tool_call(tool_call, "req1", {"run_id": "r", "iteration_id": "t"})
+    result = await runner._tool_batch.execute_one(tool_call, "req1", {"run_id": "r", "iteration_id": "t"})
     assert result["result"]["value"] == b"abc"
 
     runner.set_tools(_DummyExecutor({"ok": True, "value": (1, 2)}))
-    result = await runner._run_tool_call(tool_call, "req1", {"run_id": "r", "iteration_id": "t"})
+    result = await runner._tool_batch.execute_one(tool_call, "req1", {"run_id": "r", "iteration_id": "t"})
     assert result["result"]["value"] == (1, 2)
 
 
 @pytest.mark.asyncio
 async def test_run_tool_call_timeout(monkeypatch):
     runner = _make_runner()
-    runner.tool_timeout_seconds = 1.0
+    runner._tool_batch.timeout = 1.0
     runner.set_tools(_DummyExecutor({"ok": True, "value": "ok"}))
 
     async def fake_wait_for(*args, **kwargs):
@@ -175,25 +177,25 @@ async def test_run_tool_call_timeout(monkeypatch):
     import asyncio as _asyncio
     monkeypatch.setattr(_asyncio, "wait_for", fake_wait_for)
 
-    tool_call = {
+    tool_call: ToolCall = {
         "id": "t1",
         "name": "echo",
         "arguments": {"x": 1},
         "index_in_iteration": 0,
     }
 
-    result = await runner._run_tool_call(tool_call, "req1", {"run_id": "r", "iteration_id": "t"})
+    result = await runner._tool_batch.execute_one(tool_call, "req1", {"run_id": "r", "iteration_id": "t"})
     assert result["result"]["ok"] is False
     assert result["result"]["error"] == "tool_execution_timeout"
     assert result["result"]["hint"] == "tool execution may still be running; do not blindly retry"
-    assert result["result"]["meta"]["execution_may_continue"] is True
+    assert _result_meta(result)["execution_may_continue"] is True
 
 
 @pytest.mark.asyncio
 async def test_emit_tool_batch_missing_executor():
     runner = _make_runner()
     events = []
-    async for event in runner._emit_tool_batch(
+    async for event in runner._tool_batch.execute_batch(
         tool_calls=[{"id": "t1", "name": "echo", "arguments": {}, "index_in_iteration": 0}],
         request_id="req1",
         trace_meta={"run_id": "r", "iteration_id": "t", "request_id": "q"},
@@ -209,7 +211,7 @@ async def test_emit_tool_batch_empty():
     runner = _make_runner()
     runner.set_tools(_DummyExecutor({"ok": True, "value": "ok"}))
     events = []
-    async for event in runner._emit_tool_batch([], "req1", {"run_id": "r", "iteration_id": "t", "request_id": "q"}):
+    async for event in runner._tool_batch.execute_batch([], "req1", {"run_id": "r", "iteration_id": "t", "request_id": "q"}):
         events.append(event)
     assert events == []
 
@@ -219,13 +221,13 @@ async def test_emit_tool_batch_success():
     runner = _make_runner()
     runner.set_tools(_DummyExecutor({"ok": True, "value": "ok"}))
 
-    tool_calls = [
+    tool_calls: list[ToolCall] = [
         {"id": "t1", "name": "echo", "arguments": {}, "index_in_iteration": 1},
         {"id": "t0", "name": "echo", "arguments": {}, "index_in_iteration": 0},
     ]
 
     events = []
-    async for event in runner._emit_tool_batch(
+    async for event in runner._tool_batch.execute_batch(
         tool_calls=tool_calls,
         request_id="req1",
         trace_meta={"run_id": "r", "iteration_id": "t", "request_id": "q"},
@@ -274,20 +276,20 @@ async def test_emit_tool_batch_aborts_quickly_on_cancellation():
 
     token = CancellationToken()
     runner = _make_runner()
-    runner.cancellation_token = token
+    runner._tool_batch.cancellation_token = token
     runner.set_tools(cast(ToolExecutor, _SlowExecutor()))
 
     async def cancel_soon() -> None:
         await asyncio.sleep(0.05)
         token.cancel()
 
-    tool_calls = [
+    tool_calls: list[ToolCall] = [
         {"id": "t1", "name": "slow", "arguments": {}, "index_in_iteration": 0},
     ]
 
     async def drain() -> list[Any]:
         collected: list[Any] = []
-        async for event in runner._emit_tool_batch(
+        async for event in runner._tool_batch.execute_batch(
             tool_calls=tool_calls,
             request_id="req1",
             trace_meta={"run_id": "r", "iteration_id": "t", "request_id": "q"},
@@ -447,3 +449,10 @@ class TestResultSummary:
             "value": {"has_page_info": False},
         })
         assert "has_page_info=False" in result
+
+
+def _result_meta(result: ToolCallResult) -> dict[str, JsonValue]:
+    """校验测试观测到的结果元数据。"""
+    meta = result["result"].get("meta")
+    assert isinstance(meta, dict)
+    return meta

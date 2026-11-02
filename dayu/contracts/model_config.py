@@ -15,6 +15,7 @@ class RunnerType(StrEnum):
 
     OPENAI_COMPATIBLE = "openai_compatible"
     CLI = "cli"
+    OPENAI_RESPONSES = "openai_responses"
 
 
 DISABLED_RUNNER_TYPES: frozenset[RunnerType] = frozenset({RunnerType.CLI})
@@ -138,7 +139,35 @@ class CliModelConfig(BaseModelConfig, total=False):
     reasoning_effort: str
 
 
-ModelConfig: TypeAlias = OpenAICompatibleModelConfig | CliModelConfig
+class ResponsesAuthConfig(TypedDict, total=False):
+    """模型配置仅携带凭据引用，不携带 token。"""
+
+    type: Literal["chatgpt", "api_key"]
+    account_ref: str
+    api_key_env: str
+
+
+class ResponsesModelConfig(BaseModelConfig, total=False):
+    """原生 Responses 配置，认证与协议分别建模。"""
+
+    runner_type: Literal["openai_responses"]
+    auth: ResponsesAuthConfig
+    reasoning_effort: str
+    max_retries: int
+    stream_idle_timeout: float
+
+
+class ResponsesRunnerParams(TypedDict, total=False):
+    """运行参数只含引用，允许 Host 持久化。"""
+
+    model: str
+    auth: ResponsesAuthConfig
+    reasoning_effort: str
+    timeout: float
+    max_retries: int
+
+
+ModelConfig: TypeAlias = OpenAICompatibleModelConfig | CliModelConfig | ResponsesModelConfig
 
 
 class OpenAICompatibleRunnerParams(TypedDict, total=False):
@@ -170,7 +199,7 @@ class CliRunnerParams(TypedDict, total=False):
     name: str
 
 
-RunnerParams: TypeAlias = OpenAICompatibleRunnerParams | CliRunnerParams
+RunnerParams: TypeAlias = OpenAICompatibleRunnerParams | CliRunnerParams | ResponsesRunnerParams
 
 
 __all__ = [
