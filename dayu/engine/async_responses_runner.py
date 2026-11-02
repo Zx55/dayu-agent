@@ -12,7 +12,7 @@ import httpx
 
 from dayu.contracts.agent_types import AgentMessage, JsonValue
 from dayu.contracts.cancellation import CancellationToken
-from dayu.contracts.model_credentials import ModelAuthenticationError, ModelCredentialProvider
+from dayu.contracts.model_credentials import ModelAuthenticationError, ModelCredentialProvider, RESPONSES_TOKEN_REFRESH_CODES
 from dayu.contracts.protocols import ToolExecutor
 from dayu.engine.cancellation import await_or_cancel, create_cancellation_waiter
 from dayu.engine.events import StreamEvent, content_complete, content_delta, done_event, error_event
@@ -22,7 +22,6 @@ from dayu.engine.tool_batch_executor import ToolBatchExecutor
 
 _WaitResult = TypeVar("_WaitResult")
 RESPONSES_ENDPOINT = "https://api.openai.com/v1/responses"
-AUTH_REFRESH_CODES = frozenset({"token_expired", "access_token_expired", "invalid_token"})
 TEMPORARY_CODES = frozenset({"subscription_sharing_usage_unavailable", "subscription_sharing_user_unavailable"})
 CONTEXT_OVERFLOW_CODES = frozenset({"context_length_exceeded", "context_window_exceeded"})
 CONTINUABLE_INCOMPLETE_REASONS = frozenset({"max_output_tokens", "max_messages"})
@@ -269,7 +268,7 @@ class AsyncResponsesRunner:
                 yield error_event(str(exc), recoverable=False, error_type="model_authentication_required")
                 return
             except ResponsesFailure as exc:
-                if not emitted and exc.code in AUTH_REFRESH_CODES and not refreshed:
+                if not emitted and exc.code in RESPONSES_TOKEN_REFRESH_CODES and not refreshed:
                     refreshed = True
                     request_refresh = True
                     continue

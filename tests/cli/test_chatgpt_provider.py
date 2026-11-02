@@ -5,13 +5,16 @@ import time
 from contextlib import contextmanager
 from typing import Iterator
 from dataclasses import replace
+from functools import partial
 from argparse import Namespace
 from pathlib import Path
 
 import pytest
+import httpx
 
 from dayu.cli.commands import init
 from dayu.cli import chatgpt_setup
+from dayu.auth import chatgpt
 from dayu.auth.store import CredentialStore, ChatGPTRegistration
 from dayu.auth.oauth import PendingAuthorization
 from dayu.auth.chatgpt import PLAN_SCOPE
@@ -285,13 +288,18 @@ def _pending(previous: ChatGPTRegistration | None = None) -> PendingAuthorizatio
 
 
 @pytest.mark.parametrize(
-    "failure", ["directory", "input", "interrupt", "manifest", "credential", "concurrent_refresh", "success"]
+    "failure", ["directory", "input", "interrupt", "manifest", "credential", "allowlist", "concurrent_refresh", "success"]
 )
 def test_login_setup_commits_together_or_preserves_existing_connection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     """候选授权成功后，任一步失败均不能切换账号或留下部分配置。"""
     config = prepare(tmp_path)
+    if failure == "allowlist":
+        path = config / "prompts/manifests/prompt.json"
+        manifest = json.loads(path.read_text())
+        manifest["model"]["allowed_names"] = None
+        path.write_text(json.dumps(manifest))
     store = CredentialStore(root=tmp_path / "auth")
     old = replace(_pending().registration, client_id="old-client", subject="old-account", generation="old-generation")
     with store.lock():
@@ -354,3 +362,87 @@ def test_login_setup_commits_together_or_preserves_existing_connection(
     check_lock = _workspace_lock(config)
     check_lock.acquire()
     check_lock.release()
+
+
+@pytest.mark.parametrize("failure", ["expired", "unknown", "terminal", "network", "refresh_network", "input"])
+def test_real_catalog_init_failure_classification_and_config_preservation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], failure: str
+) -> None:
+    """真实目录过期恢复穿过 init，认证与网络提示分离且失败不留下配置改动。
+
+    Args:
+        tmp_path: 隔离工作区与凭据。
+        monkeypatch: 仅模拟 HTTP 和用户交互，不替换目录逻辑。
+        capsys: 检查 CLI 的恢复提示。
+        failure: 目录或刷新阶段的故障。
+    Returns:
+        无。
+    Raises:
+        AssertionError: 提示、请求次数、凭据或配置保留不符合契约。
+    """
+    config = prepare(tmp_path)
+    paths = [config / "llm_models.json", config / "prompts/manifests/prompt.json"]
+    before = {path: path.read_bytes() for path in paths}
+    store = CredentialStore(root=tmp_path / "auth")
+    original = _pending().registration
+    with store.lock():
+        store.save(original)
+    monkeypatch.setattr(chatgpt_setup, "CredentialStore", lambda: store)
+    monkeypatch.setenv(init._INIT_PROVIDER_OPTION_ENV, "")
+    monkeypatch.setattr(init, "_detect_shell_profile", lambda: (tmp_path / "profile", True))
+    answers = iter(["", "invalid"])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """在真实 init 调用链内模拟目录和轮换响应。
+
+        Args:
+            request: 隔离 HTTP 请求。
+        Returns:
+            对应故障阶段的 HTTP 响应。
+        Raises:
+            无。
+        """
+        methods.append(request.method)
+        if request.method == "POST":
+            if failure == "terminal":
+                return httpx.Response(400, json={"error": "invalid_grant"})
+            if failure == "refresh_network":
+                return httpx.Response(503, text="<html>unavailable</html>")
+            return httpx.Response(
+                200, json={"access_token": "rotated-access", "refresh_token": "rotated-refresh", "expires_in": 3600}
+            )
+        if failure == "network":
+            return httpx.Response(503, text="<html>unavailable</html>")
+        if failure == "input" and request.headers["Authorization"] == "Bearer rotated-access":
+            return httpx.Response(
+                200, json={"models": [{"slug": "gpt-6.1-sol", "visibility": "list", "context_window": 8192}]}
+            )
+        code = "unknown" if failure == "unknown" else "access_token_expired"
+        return httpx.Response(401, json={"error": {"code": code}})
+
+    monkeypatch.setattr(chatgpt.httpx, "AsyncClient", partial(httpx.AsyncClient, transport=httpx.MockTransport(handler)))
+    assert init.run_init_command(Namespace(base=str(tmp_path), provider="chatgpt", reset=False, overwrite=False)) == 1
+    output = capsys.readouterr().out
+    if failure in {"expired", "unknown", "terminal"}:
+        assert "init --provider chatgpt" in output
+        assert "网络请求失败" not in output
+    elif failure in {"network", "refresh_network"}:
+        assert "网络请求失败" in output
+    else:
+        assert "无效的模型编号" in output
+    assert all(path.read_bytes() == content for path, content in before.items())
+    saved = store.load()
+    assert saved is not None and saved.identity == original.identity
+    if failure == "terminal":
+        assert not saved.refresh_token
+    elif failure in {"expired", "input"}:
+        assert saved.refresh_token == "rotated-refresh"
+    else:
+        assert saved == original
+    assert methods == (
+        ["GET"] if failure in {"network", "unknown"}
+        else ["GET", "POST"] if failure in {"terminal", "refresh_network"}
+        else ["GET", "POST", "GET"]
+    )

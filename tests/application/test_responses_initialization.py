@@ -129,7 +129,16 @@ def initialized_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Wo
 @pytest.mark.asyncio
 @pytest.mark.parametrize("temperature", [None, 0.2])
 @pytest.mark.parametrize(
-    "scene_name,model_name,effort", [("prompt_mt", "chatgpt-thinking", "high"), ("overview", "chatgpt", "low")]
+    "scene_name,model_name,effort,override_name",
+    [
+        ("prompt_mt", "chatgpt-thinking", "high", None),
+        ("overview", "chatgpt", "low", None),
+        *[
+            (scene, name, effort, name)
+            for scene in ("prompt", "prompt_mt", "interactive")
+            for name, effort in (("chatgpt", "low"), ("chatgpt-thinking", "high"))
+        ],
+    ],
 )
 async def test_init_to_scene_host_and_http_omits_unsupported_temperature(
     initialized_workspace: WorkspaceResources,
@@ -138,6 +147,7 @@ async def test_init_to_scene_host_and_http_omits_unsupported_temperature(
     scene_name: str,
     model_name: str,
     effort: str,
+    override_name: str | None,
 ) -> None:
     """初始化产物无需温度 profile，None 贯穿 Service、Host 与 HTTP 请求。
 
@@ -148,6 +158,7 @@ async def test_init_to_scene_host_and_http_omits_unsupported_temperature(
         scene_name: 覆盖初始化的深度与快速场景。
         model_name: 场景对应的默认模型配置名。
         effort: 来自包内模板的推理档位。
+        override_name: 显式 CLI 模型选择，为空时使用角色默认项。
     Returns:
         无。
     Raises:
@@ -166,7 +177,7 @@ async def test_init_to_scene_host_and_http_omits_unsupported_temperature(
         scene_definition_reader=SceneDefinitionReader(workspace.prompt_asset_store),
         conversation_policy_reader=ConversationPolicyReader(),
     )
-    accepted = service.prepare(scene_name, ExecutionOptions(temperature=temperature))
+    accepted = service.prepare(scene_name, ExecutionOptions(temperature=temperature, model_name=override_name))
     assert accepted.accepted_execution_spec.model.model_name == model_name
     assert accepted.resolved_temperature is None
     assert accepted.scene_model.temperature is None
@@ -245,3 +256,43 @@ async def test_init_to_scene_host_and_http_omits_unsupported_temperature(
     # Host 自有的压缩场景也必须使用同一温度规则，而非只修复 Service 入口。
     compaction = host._prepare_host_owned_scene_state(scene_name="conversation_compaction", execution_options=None)
     assert compaction.agent_create_args.temperature is None
+
+
+def test_init_only_allows_two_chatgpt_roles_in_cli_chat_scenes(
+    initialized_workspace: WorkspaceResources, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """初始化只放宽三个 CLI 对话场景，不扩展内部场景权限或移除既有候选。
+
+    Args:
+        initialized_workspace: 从包内默认配置完整初始化的隔离工作区。
+        monkeypatch: 为第二次定向初始化提供默认回答。
+    Returns:
+        无。
+    Raises:
+        AssertionError: 其他场景被放宽、原候选丢失或初始化不幂等。
+    """
+    directory = initialized_workspace.config_root / "prompts" / "manifests"
+    before = {path: path.read_bytes() for path in directory.glob("*.json")}
+    answers = iter(["", "", "", ""])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    assert init.run_init_command(
+        Namespace(base=str(initialized_workspace.workspace_dir), provider="chatgpt", reset=False, overwrite=False)
+    ) == 0
+    assert all(path.read_bytes() == content for path, content in before.items())
+    aliases = {"chatgpt", "chatgpt-thinking"}
+    for path in directory.glob("*.json"):
+        data = json.loads(path.read_text())
+        model = data.get("model")
+        if not isinstance(model, dict):
+            continue
+        allowed = model.get("allowed_names", [])
+        expected = (
+            aliases if path.stem in {"prompt", "prompt_mt", "interactive"}
+            else aliases & {model["default_name"]}
+        )
+        assert aliases & set(allowed) == expected, path.name
+        assert len(allowed) == len(set(allowed)), path.name
+        original = json.loads(ConfigFileResolver().read_text(f"prompts/manifests/{path.name}"))["model"].get(
+            "allowed_names", []
+        )
+        assert set(original) <= set(allowed), path.name

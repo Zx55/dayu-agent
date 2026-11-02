@@ -215,6 +215,8 @@ Prompt 装配还遵循一条 Prefix Cache 导向的顺序约束：
 
 `init` 登录型流程通过配置加载器读取包内模板并复制为工作区条目，保留模板中的超时等字段。模型选择优先采用账号目录中与模板匹配的项，缺失时明确提示并允许选择其他可见模型。实际选择的模型、目录窗口或手动确认值，以及显式选择的 thinking 档位覆盖相应字段，窗口必须是确认过的正整数。scene 的默认与允许模型仍由 manifest 管理，用户可继续编辑工作区 JSON。重装程序包不会覆盖已有工作区模型配置，重新运行 `init --provider chatgpt` 才会从当前包模板重新生成该 provider 条目。
 
+ChatGPT 初始化在同一配置事务内将两个 alias 加入 `prompt`、`prompt_mt`、`interactive` 的 `model.allowed_names`，保留已有候选和角色默认值，允许 CLI 显式切换档位。其他 scene 只加入其角色对应的默认 alias。运行时继续严格检查 manifest allowlist，初始化失败时允许项与其他模型配置一起回滚。
+
 协议与认证来源分离。手动配置 API key 的 Responses 条目可使用 `auth: {"type": "api_key", "api_key_env": "OPENAI_API_KEY"}`。配置仅存变量名或账号引用，不保存秘密。该 Runner 使用公共 OpenAI Responses endpoint，不是任意兼容代理入口。
 
 账号路径固定流式和 `store=false`，将内部 system 消息转为 developer，使用本地函数 namespace，不发送 `temperature` 或 `previous_response_id`。Responses 不要求 `runtime_hints.temperature_profiles`，scene 接受结果、展示模型与 Host 参数中的 temperature 为 `None`，显式 `--temperature` 也不生效。现有模型级 `stream_idle_timeout` 和 `run.json` 的工具超时继续生效。未声明的 extra payload 会报错，不会绕过协议限制。
