@@ -175,6 +175,192 @@ async def test_models_and_missing_auth(tmp_path: Path, monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
+async def test_model_catalog_concurrent_expiry_refreshes_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """目录同时拒绝旧 token 时复用锁内刷新，避免重复轮换。
+
+    Args:
+        tmp_path: 隔离凭据目录。
+        monkeypatch: 将模型目录与刷新端点重定向到模拟传输。
+    Returns:
+        无。
+    Raises:
+        AssertionError: 刷新次数或目录结果不正确。
+    """
+    store = CredentialStore(root=tmp_path)
+    with store.lock():
+        store.save(registration(expires_at=time.time() + 3600))
+    rejected = 0
+    refreshed = 0
+    both_rejected = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        """同步两个目录拒绝并模拟唯一轮换。
+
+        Args:
+            request: 隔离 HTTP 请求。
+        Returns:
+            目录或刷新响应。
+        Raises:
+            AssertionError: 重复使用了不正确的凭据。
+            TimeoutError: 并发请求未到达目录。
+        """
+        nonlocal rejected, refreshed
+        if request.method == "POST":
+            refreshed += 1
+            assert parse_qs(request.content.decode())["refresh_token"] == ["old-refresh"]
+            return httpx.Response(
+                200, json={"access_token": "new-access", "refresh_token": "new-refresh", "expires_in": 3600}
+            )
+        if request.headers["Authorization"] == "Bearer old-access":
+            rejected += 1
+            if rejected == 2:
+                both_rejected.set()
+            await asyncio.wait_for(both_rejected.wait(), 2)
+            return httpx.Response(401, json={"error": {"code": "access_token_expired"}})
+        assert request.headers["Authorization"] == "Bearer new-access"
+        return httpx.Response(200, json={"models": [{"slug": "visible", "visibility": "list"}]})
+
+    monkeypatch.setattr(chatgpt.httpx, "AsyncClient", partial(httpx.AsyncClient, transport=httpx.MockTransport(handler)))
+    results = await asyncio.gather(*(list_models(ChatGPTCredentialProvider(store)) for _ in range(2)))
+    assert results == [[{"slug": "visible", "visibility": "list"}]] * 2
+    assert rejected == 2 and refreshed == 1
+    saved = store.load()
+    assert saved is not None and saved.refresh_token == "new-refresh"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["token_expired", "access_token_expired", "invalid_token", "unknown", None])
+async def test_model_catalog_auth_rejection_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: str | None
+) -> None:
+    """已知拒绝只重试一次，未知或非 JSON 401 直接要求登录且不清除凭据。
+
+    Args:
+        tmp_path: 隔离凭据目录。
+        monkeypatch: 隔离 HTTP 请求。
+        code: 服务端认证错误，None 表示非 JSON。
+    Returns:
+        无。
+    Raises:
+        AssertionError: 重试无界、错误分类不正确或凭据意外清除。
+    """
+    store = CredentialStore(root=tmp_path)
+    with store.lock():
+        store.save(registration(expires_at=time.time() + 3600))
+    methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """持续拒绝目录请求并提供有效轮换结果。
+
+        Args:
+            request: 隔离 HTTP 请求。
+        Returns:
+            模拟的目录或刷新响应。
+        Raises:
+            无。
+        """
+        methods.append(request.method)
+        if request.method == "POST":
+            return httpx.Response(
+                200, json={"access_token": "new-access", "refresh_token": "new-refresh", "expires_in": 3600}
+            )
+        return httpx.Response(401, json={"error": {"code": code}}) if code else httpx.Response(401, text="denied")
+
+    monkeypatch.setattr(chatgpt.httpx, "AsyncClient", partial(httpx.AsyncClient, transport=httpx.MockTransport(handler)))
+    with pytest.raises(ModelAuthenticationError, match="init --provider chatgpt"):
+        await list_models(ChatGPTCredentialProvider(store))
+    known = code in {"token_expired", "access_token_expired", "invalid_token"}
+    assert methods == (["GET", "POST", "GET"] if known else ["GET"])
+    saved = store.load()
+    assert saved is not None and saved.refresh_token == ("new-refresh" if known else "old-refresh")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [429, 503])
+@pytest.mark.parametrize("body", ["", "<html>temporarily unavailable</html>"])
+async def test_model_catalog_transient_errors_preserve_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int, body: str
+) -> None:
+    """目录临时错误保持 HTTP 分类，不刷新或清除尚有效凭据。
+
+    Args:
+        tmp_path: 隔离凭据目录。
+        monkeypatch: 隔离 HTTP 请求。
+        status: 临时错误状态。
+        body: 代理返回的非 JSON 响应。
+    Returns:
+        无。
+    Raises:
+        AssertionError: 凭据被修改或错误分类丢失。
+    """
+    store = CredentialStore(root=tmp_path)
+    original = registration(expires_at=time.time() + 3600)
+    with store.lock():
+        store.save(original)
+    methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """以非 JSON 响应模拟临时故障。
+
+        Args:
+            request: 隔离 HTTP 请求。
+        Returns:
+            临时故障响应。
+        Raises:
+            无。
+        """
+        methods.append(request.method)
+        return httpx.Response(status, text=body)
+
+    monkeypatch.setattr(chatgpt.httpx, "AsyncClient", partial(httpx.AsyncClient, transport=httpx.MockTransport(handler)))
+    with pytest.raises(httpx.HTTPStatusError) as failure:
+        await list_models(ChatGPTCredentialProvider(store))
+    assert failure.value.response.status_code == status
+    assert methods == ["GET"]
+    assert store.load() == original
+
+
+@pytest.mark.asyncio
+async def test_expired_candidate_catalog_keeps_active_connection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """目录拒绝候选 token 后重新授权，不得借正式连接刷新或提前激活候选。
+
+    Args:
+        tmp_path: 隔离正式连接目录。
+        monkeypatch: 模拟服务端提前拒绝候选授权。
+    Returns:
+        无。
+    Raises:
+        AssertionError: 正式连接被修改或请求了刷新。
+    """
+    store = CredentialStore(root=tmp_path)
+    original = registration(expires_at=time.time() + 3600)
+    with store.lock():
+        store.save(original)
+    pending = oauth.PendingAuthorization(replace(original, subject="candidate", access_token="candidate-access"), "g1")
+    methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """仅拒绝候选授权的目录请求。
+
+        Args:
+            request: 隔离 HTTP 请求。
+        Returns:
+            候选 token 过期响应。
+        Raises:
+            AssertionError: 使用了正式连接的 token。
+        """
+        methods.append(request.method)
+        assert request.headers["Authorization"] == "Bearer candidate-access"
+        return httpx.Response(401, json={"error": {"code": "access_token_expired"}})
+
+    monkeypatch.setattr(chatgpt.httpx, "AsyncClient", partial(httpx.AsyncClient, transport=httpx.MockTransport(handler)))
+    with pytest.raises(ModelAuthenticationError, match="重新登录"):
+        await list_models(pending)
+    assert methods == ["GET"]
+    assert store.load() == original
+
+
+@pytest.mark.asyncio
 async def test_refresh_commit_survives_cancellation_during_client_close(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

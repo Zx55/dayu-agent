@@ -4,6 +4,10 @@ from dataclasses import dataclass
 from typing import Protocol
 
 
+# Responses 模型目录与推理请求使用同一组可刷新 token 错误，避免恢复策略漂移。
+RESPONSES_TOKEN_REFRESH_CODES = frozenset({"token_expired", "access_token_expired", "invalid_token"})
+
+
 class ModelAuthenticationError(RuntimeError):
     """认证不可恢复，宿主必须终止本次运行而非强制生成答案。"""
 

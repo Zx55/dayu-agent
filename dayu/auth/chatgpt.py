@@ -12,7 +12,12 @@ from filelock import Timeout
 
 from dayu.auth.store import CredentialStore
 from dayu.contracts.agent_types import JsonValue
-from dayu.contracts.model_credentials import ModelAuthenticationError, ModelCredential, ModelCredentialProvider
+from dayu.contracts.model_credentials import (
+    ModelAuthenticationError,
+    ModelCredential,
+    ModelCredentialProvider,
+    RESPONSES_TOKEN_REFRESH_CODES,
+)
 
 TOKEN_ENDPOINT = "https://auth.openai.com/api/accounts/oauth/token"
 API_RESOURCE = "https://api.openai.com/v1"
@@ -156,25 +161,42 @@ class ChatGPTCredentialProvider:
 
 
 async def list_models(provider: ModelCredentialProvider) -> list[dict[str, JsonValue]]:
-    """读取账号可见的模型目录，不将目录视为推理成功证明。
+    """读取账号可见的模型目录，服务端拒绝已知过期 token 时最多刷新一次。
 
     Args:
         provider: 已登录账号的凭据提供器。
     Returns:
         可展示的模型信息。
     Raises:
-        ModelAuthenticationError: 无有效授权。
+        ModelAuthenticationError: 无有效授权、候选授权不能刷新或刷新后仍被拒绝。
         httpx.HTTPError: 模型请求失败。
         ValueError: 目录格式不正确。
     """
-    credential = await provider.acquire()
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS) as client:
-        response = await client.get(
-            f"{API_RESOURCE}/models", headers={"Authorization": f"Bearer {credential.access_token}"}
-        )
+        refresh = False
+        while True:
+            credential = await provider.acquire(refresh=refresh)
+            response = await client.get(
+                f"{API_RESOURCE}/models", headers={"Authorization": f"Bearer {credential.access_token}"}
+            )
+            if response.status_code != 401:
+                break
+            try:
+                failure: JsonValue = response.json()
+            except ValueError:
+                failure = None
+            error = failure.get("error") if isinstance(failure, dict) else None
+            code = error.get("code") if isinstance(error, dict) else error
+            # 只恢复明确的 token 拒绝。未知 401 或重复拒绝不能进入网络重试。
+            if not refresh and isinstance(code, str) and code in RESPONSES_TOKEN_REFRESH_CODES:
+                refresh = True
+                continue
+            raise ModelAuthenticationError(
+                "ChatGPT 模型目录授权已失效，请运行 dayu-cli init --provider chatgpt，选择 login 重新登录"
+            )
     response.raise_for_status()
-    data: dict[str, JsonValue] = response.json()
-    models = data.get("models")
+    data: JsonValue = response.json()
+    models = data.get("models") if isinstance(data, dict) else None
     if not isinstance(models, list):
         raise ValueError("ChatGPT 模型目录结构不正确")
     return [row for row in models if isinstance(row, dict) and row.get("visibility") == "list"]

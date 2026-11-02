@@ -23,6 +23,7 @@ from dayu.cli.config_transaction import configuration_transaction, write_config_
 
 CHATGPT_FAST_MODEL_KEY = "chatgpt"
 CHATGPT_THINKING_MODEL_KEY = "chatgpt-thinking"
+_CHATGPT_MODEL_SWITCHING_SCENES = frozenset({"prompt", "prompt_mt", "interactive"})
 
 
 def _load_chatgpt_templates() -> dict[str, ResponsesModelConfig]:
@@ -44,6 +45,32 @@ def _load_chatgpt_templates() -> dict[str, ResponsesModelConfig]:
             raise ValueError(f"包内 ChatGPT 模板缺失或无效：{name}")
         templates[name] = cast(ResponsesModelConfig, model)
     return templates
+
+
+def _update_chatgpt_model_choices(manifests: tuple[Path, ...], model_names: tuple[str, ...]) -> None:
+    """在初始化事务内配置 CLI 对话场景的模型候选，不改变默认角色或执行校验。
+
+    Args:
+        manifests: 当前事务已保存快照的工作区 manifest。
+        model_names: 本次初始化实际生成的 ChatGPT 模型配置名。
+    Returns:
+        无。
+    Raises:
+        ValueError: 对话场景的模型候选配置无效。
+        OSError: 读取或写入失败，由外层事务回滚。
+    """
+    for path in manifests:
+        if path.stem not in _CHATGPT_MODEL_SWITCHING_SCENES:
+            continue
+        data: JsonValue = json.loads(path.read_text(encoding="utf-8"))
+        model = data.get("model") if isinstance(data, dict) else None
+        allowed = model.get("allowed_names") if isinstance(model, dict) else None
+        if not isinstance(allowed, list):
+            raise ValueError(f"ChatGPT 对话场景缺少模型候选列表：{path.name}")
+        missing = [name for name in model_names if name not in allowed]
+        if missing:
+            allowed.extend(missing)
+            write_config_bytes(path, (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode())
 
 
 @contextmanager
@@ -140,6 +167,7 @@ def configure_chatgpt(config_dir: Path, *, workspace_lock: StateDirSingleInstanc
             manifests = tuple((config_dir / "prompts" / "manifests").glob("*.json"))
             with store.preserve_registration(), configuration_transaction((path, *manifests)):
                 write_config_bytes(path, (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode())
+                _update_chatgpt_model_choices(manifests, tuple(templates))
                 yield CHATGPT_FAST_MODEL_KEY, CHATGPT_THINKING_MODEL_KEY
                 # 调用方已完成默认项更新。保存失败会在持锁期间恢复文件快照。
                 if pending is not None:
