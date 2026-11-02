@@ -211,7 +211,9 @@ Prompt 装配还遵循一条 Prefix Cache 导向的顺序约束：
 
 ### Responses 与账号凭据引用
 
-`runner_type: openai_responses` 使用原生 Responses 协议。`init` 登录型流程生成 `chatgpt`、`chatgpt-thinking` 模型条目，包含账号目录选定的 `model`、`auth: {"type": "chatgpt", "account_ref": "chatgpt"}`、`reasoning_effort` 和 `max_context_tokens`。后者必须是确认过的正整数。scene 的默认与允许模型仍由 manifest 管理。
+`runner_type: openai_responses` 使用原生 Responses 协议。包内 `llm_models.json` 提供 `chatgpt` 和 `chatgpt-thinking` 两个订阅模板，默认模型为 `gpt-6.1-sol`，推理档位分别为 `low` 和 `high`，默认窗口为 500000。认证配置只包含 `auth: {"type": "chatgpt", "account_ref": "chatgpt"}`。
+
+`init` 登录型流程通过配置加载器读取包内模板并复制为工作区条目，保留模板中的超时等字段。模型选择优先采用账号目录中与模板匹配的项，缺失时明确提示并允许选择其他可见模型。实际选择的模型、目录窗口或手动确认值，以及显式选择的 thinking 档位覆盖相应字段，窗口必须是确认过的正整数。scene 的默认与允许模型仍由 manifest 管理，用户可继续编辑工作区 JSON。重装程序包不会覆盖已有工作区模型配置，重新运行 `init --provider chatgpt` 才会从当前包模板重新生成该 provider 条目。
 
 协议与认证来源分离。手动配置 API key 的 Responses 条目可使用 `auth: {"type": "api_key", "api_key_env": "OPENAI_API_KEY"}`。配置仅存变量名或账号引用，不保存秘密。该 Runner 使用公共 OpenAI Responses endpoint，不是任意兼容代理入口。
 

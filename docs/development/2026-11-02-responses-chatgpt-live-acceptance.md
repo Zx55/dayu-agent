@@ -97,3 +97,13 @@ Host `runs --all` 确认上述四次均为 `succeeded`，同一 session 保持 `
 上述默认启动 finding 已修复，集成回归和不传 `--temperature` 的重验结果见前文。真实财报研究作为独立业务验收项继续保留。
 
 官方授权与账号模型目录的对照依据为 [Registration and sign-in](https://developers.openai.com/siwc/token-sharing-open-source/sign-in) 和 [Models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)。实际可用性结论以上述真实调用记录为准。
+
+## 两档默认模板后续验收
+
+包内补齐 `chatgpt-thinking`（`gpt-6.1-sol` / high）和 `chatgpt`（同模型 / low）后，provider 改为从包内模板生成工作区配置。默认模型匹配账号目录中的模型标识，不依赖目录顺序，thinking 默认档位来自模板，快速档及超时等字段完整继承。
+
+测试先复现旧行为不符合模板契约，实施后定向 **27 passed**，扩大回归 **2115 passed, 1 skipped**。初始化模块覆盖率 94%，pyright 与原 17 项错误基线一致。完整 init → scene/Host → HTTP 集成回归用目录第二项作为模板模型，两个 scene 的实际 payload 分别断言 high 和 low。
+
+真实验收继续使用原隔离授权，重新运行 `init --provider chatgpt` 并全部采用默认值。账号凭据自动刷新请求和模型目录请求均返回 HTTP 200，无需再次浏览器登录。生成配置的模型为 `gpt-6.1-sol`，窗口采用账号目录的 500000，两个 effort 为 high / low。
+
+通过 `workspace/tmp/chatgpt-template-live.py`，从实际生成配置经 Service scene 接受及 Host 准备，分别向真实 Responses endpoint 发起 high、low 请求。两次均收到完成终态及正文“配置调用正常。”，没有温度覆盖。这是两档配置的真实请求验证，不声称新跑了完整财报研究、并发刷新或撤销测试。原始结果在 `workspace/tmp/chatgpt-templates-live-before-install.json`，安装后还会使用全局环境执行同一验证。

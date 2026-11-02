@@ -506,7 +506,9 @@ Fins 相关改动时，至少同步更新：
 
 - `tests/application/test_chatgpt_auth.py` 使用隔离凭据目录、模拟 OpenAI HTTP 响应、真实本地 loopback 和签名 fixture，覆盖验签、拒绝授权、候选授权不激活、并发轮换刷新及错误分类。刷新响应返回后在客户端关闭阶段取消时，新 refresh token 必须已保存，下一次请求不得再使用旧 token。HTML/空 429/5xx 必须保留凭据并保持 HTTP 错误类型。
 - `tests/cli/test_chatgpt_provider.py` 覆盖 provider 认证策略、定向初始化与模型配置写入。模型目录、输入、中断、默认项写入或凭据提交失败时，旧凭据和配置必须保留；并发刷新改变版本后不得被候选授权覆盖。测试使用与 init/reset 相同的工作区锁验证成功和失败后的锁释放。
+- ChatGPT 模板回归验证包内 `gpt-6.1-sol` high/low 预设、首选模型不在目录首位、模板模型不可见时的提示、用户选择替代模型、模板字段继承及包内配置不变。损坏模板必须在打开浏览器和写配置之前被拒绝，不能以 Python 中重新拼装的配置替代模板真源。
 - `tests/application/test_responses_initialization.py` 执行完整 ChatGPT init，随后从生成文件加载真实 scene，经 Service 接受、Host 准备与 Runner 发出本地 HTTP 请求。没有温度覆盖和显式覆盖时，temperature 均以 None 贯穿展示 DTO、接受契约和 AgentCreateArgs，HTTP 不携带该字段。Host 自有压缩 scene 也复用同一规则。只模拟授权、模型目录和用户交互，不替换 scene 解析或 Host 装配。
+- 完整初始化集成同时覆盖深度场景和快速场景，目录将 `gpt-6.1-sol` 放在第二项，输入全用默认值，最终 HTTP payload 必须分别为 high 和 low，证明 scene/Host 实际消费了两个模板。
 - `tests/engine/test_responses_runner.py` 用本地 HTTP/SSE 服务验证多轮工具调用、参数完整性、reasoning 回传、取消和认证错误终止。上下文超限须实际触发 Agent 压缩后重试，文本截断须带 reasoning 状态续写，过滤终态不得续写，incomplete 工具请求即使参数完整也不得执行。刷新 HTML 503 后成功的用例验证认证到 Runner 的有限重试链路。
 - 原工具执行测试迁到共享 `ToolBatchExecutor` 边界。既有 OpenAI Runner 请求、Agent 治理和 Host 测试继续作为回归。
 

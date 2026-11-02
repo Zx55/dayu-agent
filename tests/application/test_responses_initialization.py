@@ -77,7 +77,10 @@ async def _models(provider: ModelCredentialProvider) -> list[dict[str, JsonValue
         ModelAuthenticationError: 候选授权不可用。
     """
     await provider.acquire()
-    return [{"slug": "fixture-model", "display_name": "Fixture", "context_window": 8192}]
+    return [
+        {"slug": "other-model", "display_name": "Other", "context_window": 2048},
+        {"slug": "gpt-6.1-sol", "display_name": "GPT-6.1 Sol", "context_window": 8192},
+    ]
 
 
 @pytest.fixture
@@ -106,7 +109,7 @@ def initialized_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Wo
     monkeypatch.setattr(init, "_prompt_optional_search_keys", lambda: [])
     monkeypatch.setattr(init, "_prompt_huggingface_config", lambda: [])
     monkeypatch.setattr(init, "_prompt_sec_user_agent", lambda: None)
-    answers = iter(["1", "", "medium"])
+    answers = iter(["", "", ""])
     monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
     base = tmp_path / "workspace"
     assert init.run_init_command(Namespace(base=str(base), provider=None, reset=False, overwrite=False)) == 0
@@ -125,10 +128,16 @@ def initialized_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Wo
 @pytest.mark.integration
 @pytest.mark.asyncio
 @pytest.mark.parametrize("temperature", [None, 0.2])
+@pytest.mark.parametrize(
+    "scene_name,model_name,effort", [("prompt_mt", "chatgpt-thinking", "high"), ("overview", "chatgpt", "low")]
+)
 async def test_init_to_scene_host_and_http_omits_unsupported_temperature(
     initialized_workspace: WorkspaceResources,
     monkeypatch: pytest.MonkeyPatch,
     temperature: float | None,
+    scene_name: str,
+    model_name: str,
+    effort: str,
 ) -> None:
     """初始化产物无需温度 profile，None 贯穿 Service、Host 与 HTTP 请求。
 
@@ -136,6 +145,9 @@ async def test_init_to_scene_host_and_http_omits_unsupported_temperature(
         initialized_workspace: 完整 init 产生的隔离工作区。
         monkeypatch: 仅重定向模型 endpoint 到本地 HTTP 服务。
         temperature: 无覆盖和显式覆盖均不适用于 Responses。
+        scene_name: 覆盖初始化的深度与快速场景。
+        model_name: 场景对应的默认模型配置名。
+        effort: 来自包内模板的推理档位。
     Returns:
         无。
     Raises:
@@ -154,17 +166,17 @@ async def test_init_to_scene_host_and_http_omits_unsupported_temperature(
         scene_definition_reader=SceneDefinitionReader(workspace.prompt_asset_store),
         conversation_policy_reader=ConversationPolicyReader(),
     )
-    accepted = service.prepare("prompt_mt", ExecutionOptions(temperature=temperature))
-    assert accepted.accepted_execution_spec.model.model_name == "chatgpt-thinking"
+    accepted = service.prepare(scene_name, ExecutionOptions(temperature=temperature))
+    assert accepted.accepted_execution_spec.model.model_name == model_name
     assert accepted.resolved_temperature is None
     assert accepted.scene_model.temperature is None
     assert accepted.accepted_execution_spec.model.temperature is None
-    assert serialize_scene_models({"prompt_mt": accepted.scene_model}) == {
-        "prompt_mt": {"name": "chatgpt-thinking", "temperature": None}
+    assert serialize_scene_models({scene_name: accepted.scene_model}) == {
+        scene_name: {"name": model_name, "temperature": None}
     }
     contract = prepare_execution_contract(
         service_name="chat_turn",
-        scene_name="prompt_mt",
+        scene_name=scene_name,
         accepted_execution_spec=accepted.accepted_execution_spec,
         prompt_contributions={},
         user_message="只回答 OK",
@@ -185,7 +197,8 @@ async def test_init_to_scene_host_and_http_omits_unsupported_temperature(
     assert args.runner_type == "openai_responses"
     assert "temperature" not in args.runner_params
     assert prepared.agent_input.tools is not None
-    assert prepared.agent_input.tools.get_schemas()
+    if scene_name == "prompt_mt":
+        assert prepared.agent_input.tools.get_schemas()
     requests: list[dict[str, JsonValue]] = []
 
     async def handle(request: web.Request) -> web.Response:
@@ -224,7 +237,8 @@ async def test_init_to_scene_host_and_http_omits_unsupported_temperature(
         assert not any(event.type == EventType.ERROR for event in events)
         assert len(requests) == 1
         assert "temperature" not in requests[0]
-        assert requests[0]["model"] == "fixture-model"
+        assert requests[0]["model"] == "gpt-6.1-sol"
+        assert requests[0]["reasoning"] == {"effort": effort}
     finally:
         await runner.close()
         await server.cleanup()

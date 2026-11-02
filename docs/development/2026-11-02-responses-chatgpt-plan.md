@@ -254,3 +254,33 @@ llm_models.json 保存 runner_type、模型、明确来源的上下文上限、r
 为安装确切审阅版本，将当前功能分支提交为本地固定 SHA，再通过 `uv tool install --managed-python --python 3.11 --force --constraints <原环境依赖约束> "dayu-agent @ git+file:///Users/bytedance/Documents/workspace/dayu-agent@<SHA>"` 安装非 editable 副本。此步骤取代原计划的先推送/合入远端 dev，原因是本次授权只要求本机安装。安装脚本固定远端仓库，不能直接安装未发布的本地提交，故直接使用对应 uv 命令。保留原依赖版本，新增认证依赖按包声明解析。普通更新不运行 init，不覆盖日常配置、不迁移或切换账号。
 
 安装前后运行 doctor 和 CLI surface 检查，核对 PEP 610 安装来源与提交，逐文件比对安装包与审阅提交，并使用已隔离授权从安装后的环境完成模型/工具及追问冒烟。安装收据、原依赖快照、精确命令和回滚版本保存在 `~/.local/share/dayu/installations/2026-11-02-responses/`。原安装提交为 `c40664a7cd7e3094e75e107d03b43adf14087c7f`。
+
+## ChatGPT 两档默认模板补齐（已获用户授权）
+
+### Step1 让 provider 使用包内模板
+
+- Goal：将 `gpt-6.1-sol` 的 high / low 预设纳入既有默认模型目录，消除 Python 中重复拼装配置的真源。
+- Do：在包内 `dayu/config/llm_models.json` 增加 `chatgpt-thinking`（high）和 `chatgpt`（low），使用账号凭据引用和已核实的 500000 默认窗口。初始化读取模板，账号目录存在模板模型时默认选中该项，不依赖目录顺序；模型不可见时提示并保留手动选择。目录窗口或用户确认值覆盖静态窗口，thinking 档位提示默认取自模板。
+- Do Not：不自动切换日常工作区 provider，不改 OAuth、Host 或工具循环，不引入独立配置文件或另一个模板框架。
+- Planned Files And Purpose：`dayu/config/llm_models.json` 为预设真源，`dayu/cli/chatgpt_setup.py` 读取并复制模板，只覆盖明确选择的模型、窗口与 thinking 档位；相关测试放在 `tests/cli/test_chatgpt_provider.py` 和 `tests/application/test_responses_initialization.py`。
+- Risks：仅增加 JSON 条目但初始化未使用、首选模型不在账号目录、目录顺序影响默认选择、模板嵌套对象被修改、重新配置覆盖无关供应商。通过默认选择、替代模型、模板字段继承、两档实际请求与旧配置保留测试验证。
+- Tests：验证包内预设内容、preferred 模型不在首位、不可见时的提示与选择、手动覆盖、模板参数继承和不变性，以及 init → scene/Host → HTTP 两档 effort 的集成回归。
+- Acceptance Criteria：默认 high / low 来自模板，Responses HTTP 请求实际使用对应模型与 effort，无温度 profile 要求，原 API provider 与凭据回滚测试通过。
+
+### Step2 验证、发布与安装
+
+- Goal：提交并推送通过验证的功能分支，从 fork 固定提交重装全局 CLI。
+- Do：运行受影响回归与 pyright，同步根 README、配置和测试说明及本记录；用已有隔离授权检查两档真实模型请求；commit、push 后核对远端 SHA，再使用安装技能脚本指定该 SHA 并跳过 init。
+- Do Not：不合并 dev、不重置或覆盖日常工作区、不迁移隔离账号、不顺便升级现有依赖。
+- Planned Files And Purpose：前述 README 和方案文件记录实际行为；安装、回滚和验证收据留在本机 `~/.local/share/dayu/installations/`。
+- Risks：装到旧提交、依赖漂移或日常配置改变。通过 PEP 610 元数据、模板内容/源码哈希、安装前后依赖及配置指纹核对。
+- Tests：安装前后 doctor、CLI help、安装包模板断言与真实调用冒烟。
+- Acceptance Criteria：本地、fork 分支和全局安装提交一致，测试通过且无新增类型错误，日常配置与凭据不变。
+
+### 模板实施与验证结果
+
+两个预设已写入包内 `llm_models.json`，provider 通过现有配置加载器读取并复制完整模板，仅覆盖用户选择的模型、实际窗口和 thinking 档位。初始化默认优先采用模板模型，与账号目录顺序无关；不可见时提示并允许选择。源代码不再独立拼装模型/认证/快速档默认值。
+
+新增默认与模板继承测试先在旧实现产生 8 failed，实施后定向测试 **27 passed**。扩大回归 **2115 passed, 1 skipped**，初始化模块覆盖率 **94%**。pyright 仍为基线 17 errors，无新增。模板损坏时在授权前拒绝，用户覆盖、其他 provider 配置保留、凭据异常回滚和原 API 流程均由回归覆盖。
+
+使用现有隔离授权重新进入真实 `init --provider chatgpt`，全部采用回车默认值，成功生成 `gpt-6.1-sol` high / low 两档。期间真实刷新接口与模型目录均返回 HTTP 200。随后从生成配置经过 Service/Host 装配发起两次真实模型请求，两档均完成并返回正文。日志在 `workspace/tmp/chatgpt-templates-*`。本轮复核未发现新的阻断项，发布时固定本地提交并推送同一功能分支，再从 fork 的完整提交 SHA 安装。

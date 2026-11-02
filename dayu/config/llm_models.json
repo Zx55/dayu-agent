@@ -2,6 +2,34 @@
   "_comment": "LLM 模型配置文件 - 包含各个模型服务商的配置参数",
   "_usage": "使用时选择对应的配置名称，替换 YOUR_API_KEY 为实际的 API 密钥",
   "_capabilities_note": "max_context_tokens 为模型静态能力声明（来自各供应商官方文档），用于 Agent 预算治理；supports_usage / supports_stream_usage 控制 Runner 是否采集 token 用量",
+  "chatgpt": {
+    "runner_type": "openai_responses",
+    "name": "chatgpt",
+    "model": "gpt-6.1-sol",
+    "auth": {
+      "type": "chatgpt",
+      "account_ref": "chatgpt"
+    },
+    "reasoning_effort": "low",
+    "timeout": 3600,
+    "stream_idle_timeout": 120.0,
+    "max_context_tokens": 500000,
+    "description": "ChatGPT 订阅，快速推理档"
+  },
+  "chatgpt-thinking": {
+    "runner_type": "openai_responses",
+    "name": "chatgpt-thinking",
+    "model": "gpt-6.1-sol",
+    "auth": {
+      "type": "chatgpt",
+      "account_ref": "chatgpt"
+    },
+    "reasoning_effort": "high",
+    "timeout": 3600,
+    "stream_idle_timeout": 120.0,
+    "max_context_tokens": 500000,
+    "description": "ChatGPT 订阅，深度推理档"
+  },
   "deepseek-v4-flash": {
     "runner_type": "openai_compatible",
     "name": "deepseek-v4-flash",

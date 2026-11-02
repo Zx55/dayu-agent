@@ -19,6 +19,8 @@ from dayu.state_dir_lock import StateDirSingleInstanceLock
 from dayu.auth.chatgpt import ChatGPTCredentialProvider
 from dayu.contracts.agent_types import JsonValue
 from dayu.contracts.model_credentials import ModelAuthenticationError, ModelCredentialProvider
+from dayu.startup.config_file_resolver import ConfigFileResolver
+from dayu.startup.config_loader import ConfigLoader
 
 
 def prepare(base: Path) -> Path:
@@ -122,6 +124,132 @@ def test_provider_only_rejects_reset_and_uninitialized_workspace(tmp_path: Path)
     assert init.run_init_command(Namespace(base=str(tmp_path), provider="chatgpt", reset=False, overwrite=False)) == 1
     prepare(tmp_path)
     assert init.run_init_command(Namespace(base=str(tmp_path), provider="chatgpt", reset=False, overwrite=True)) == 1
+
+
+def test_package_chatgpt_templates_define_two_effort_roles() -> None:
+    """包内配置是两个订阅预设的真源，且只携带账号引用。"""
+    models = ConfigLoader(ConfigFileResolver()).load_llm_models()
+    for name, effort in (("chatgpt", "low"), ("chatgpt-thinking", "high")):
+        assert {
+            key: models[name].get(key)
+            for key in ("runner_type", "name", "model", "auth", "reasoning_effort", "max_context_tokens")
+        } == {
+            "runner_type": "openai_responses",
+            "name": name,
+            "model": "gpt-6.1-sol",
+            "auth": {"type": "chatgpt", "account_ref": "chatgpt"},
+            "reasoning_effort": effort,
+            "max_context_tokens": 500000,
+        }
+
+
+@pytest.mark.parametrize(
+    "slugs,choice,selected",
+    [
+        (["other-model", "preferred-model"], "", "preferred-model"),
+        (["preferred-model", "other-model"], "2", "other-model"),
+        (["other-model"], "", "other-model"),
+    ],
+)
+def test_provider_clones_templates_and_selects_available_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    slugs: list[str],
+    choice: str,
+    selected: str,
+) -> None:
+    """模型偏好与档位取自模板，目录顺序、手动选择和不可见情况均可控。
+
+    Args:
+        tmp_path: 独立目录。
+        monkeypatch: 隔离授权、目录查询与输入。
+        capsys: 检查首选模型不可见时的提示。
+        slugs: 账号模型目录顺序。
+        choice: 用户选择，空字符串采用模板偏好。
+        selected: 最终应生成的模型。
+    Returns:
+        无。
+    Raises:
+        AssertionError: 模板字段丢失、默认漂移或配置被意外改动。
+    """
+    config = prepare(tmp_path)
+    package = tmp_path / "package"
+    package.mkdir()
+    templates = {
+        name: {
+            "runner_type": "openai_responses",
+            "model": "preferred-model",
+            "auth": {"type": "chatgpt", "account_ref": "chatgpt"},
+            "reasoning_effort": effort,
+            "timeout": timeout,
+            "stream_idle_timeout": 45.0,
+            "max_context_tokens": 9999,
+        }
+        for name, effort, timeout in (("chatgpt", "low", 812), ("chatgpt-thinking", "medium", 913))
+    }
+    package_file = package / "llm_models.json"
+    package_file.write_text(json.dumps(templates))
+    template_bytes = package_file.read_bytes()
+    monkeypatch.setattr("dayu.startup.config_file_resolver.resolve_package_config_path", lambda: package)
+    store = CredentialStore(root=tmp_path / "auth")
+    monkeypatch.setattr(chatgpt_setup, "CredentialStore", lambda: store)
+    monkeypatch.setattr(chatgpt_setup, "authorize", lambda selected: _pending())
+
+    async def models(provider: ModelCredentialProvider) -> list[dict[str, JsonValue]]:
+        return [{"slug": slug, "context_window": 4096} for slug in slugs]
+
+    monkeypatch.setattr(chatgpt_setup, "list_models", models)
+    answers = iter([choice, "", ""])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    with chatgpt_setup.configure_chatgpt(config, workspace_lock=_workspace_lock(config)):
+        pass
+    written = json.loads((config / "llm_models.json").read_text())
+    assert written["existing"] == {"model": "old"}
+    for name, template in templates.items():
+        assert written[name] == {**template, "model": selected, "max_context_tokens": 4096}
+    assert package_file.read_bytes() == template_bytes
+    if "preferred-model" not in slugs:
+        assert "默认模板模型" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("failure", ["missing", "wrong_runner", "invalid_effort"])
+def test_invalid_package_template_stops_before_authorization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    """损坏的包内模板必须先报错，不能打开浏览器或部分写入配置。
+
+    Args:
+        tmp_path: 隔离目录。
+        monkeypatch: 提供损坏的模板和禁止调用的授权边界。
+        failure: 缺失、协议不符或非法默认档位。
+    Returns:
+        无。
+    Raises:
+        AssertionError: 模板错误未在授权前被拒绝。
+    """
+    templates = ConfigLoader(ConfigFileResolver()).load_llm_models()
+    if failure == "missing":
+        del templates["chatgpt"]
+    elif failure == "wrong_runner":
+        templates["chatgpt"] = {"runner_type": "openai_compatible"}
+    else:
+        templates["chatgpt-thinking"] = {
+            "runner_type": "openai_responses",
+            "model": "gpt-6.1-sol",
+            "reasoning_effort": "invalid",
+        }
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "llm_models.json").write_text(json.dumps(templates))
+    monkeypatch.setattr("dayu.startup.config_file_resolver.resolve_package_config_path", lambda: package)
+    monkeypatch.setattr(chatgpt_setup, "authorize", lambda selected: pytest.fail("模板错误时不应发起授权"))
+    config = prepare(tmp_path)
+    before = (config / "llm_models.json").read_bytes()
+    with pytest.raises(ValueError, match="模板"):
+        with chatgpt_setup.configure_chatgpt(config, workspace_lock=_workspace_lock(config)):
+            pass
+    assert (config / "llm_models.json").read_bytes() == before
 
 
 @contextmanager
