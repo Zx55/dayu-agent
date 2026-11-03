@@ -520,6 +520,24 @@ Fins 相关改动时，至少同步更新：
 
 以上自动化测试不使用真实 ChatGPT 账号。浏览器授权、账号推理权限和真实 labeled 研究需要单独人工验收，不能以 mock 通过替代。
 
+#### 真实账号端到端验收
+
+使用待验收的安装版本和已配置的测试工作区，先确认 scene 默认模型为 ChatGPT 订阅。首次登录或确需重新授权时运行 `dayu-cli init --base ./workspace --provider chatgpt`，已有有效授权可直接复用。不要为验收重置已有工作区。
+
+先用 `dayu-cli conv --base ./workspace list` 检查标签，选择未使用的验收 label。下面两轮必须使用相同 label，实际执行时替换示例标签，避免复用旧验收上下文：
+
+```bash
+dayu-cli prompt --base ./workspace --label chatgpt-acceptance-YYYYMMDD-HHMMSS --enable-tool-trace \
+  "这是技术验收。实际调用网页工具读取 https://example.com ，根据返回文本报告标题，给出 137+286 的结果，并记录标记 DAYU-ACCEPTANCE。"
+
+dayu-cli prompt --base ./workspace --label chatgpt-acceptance-YYYYMMDD-HHMMSS --enable-tool-trace \
+  "继续验收。复述上轮标记和计算结果，再实际读取 https://raw.githubusercontent.com/noho/dayu-agent/main/tests/fixtures/docling/dayu_docling_integration_fixture.pdf ，报告文档标题和 Revenue 的年份、数值。读取失败须如实说明。"
+```
+
+不要传 `--model-name` 或 `--temperature`，以覆盖 scene 默认模型与温度接受链路。等待两轮各自正常结束，检查退出码，并核对 trace 中存在真实工具调用、成功工具结果、后续模型迭代与 `final_response`。最终回答不得降级或被过滤，追问应保留上轮标记与结果，PDF 提取应与工具返回一致。若站点拦截，保留错误证据，选择另一个可访问的小型公开 PDF 补验转换链路，不能把访问失败记为转换成功。
+
+命令完成后用 `dayu-cli runs --base ./workspace` 和 `dayu-cli host --base ./workspace status` 确认没有本次活跃运行或 LLM 调用，再检查本次 CLI 的进程组没有遗留转换 worker。验收记录应保留安装提交、命令、退出码和 trace 路径，不记录 token。这条成功路径不替代 OAuth 过期、并发刷新和取消的自动化回归测试。
+
 ## 5. 新增测试时的约束
 
 新增测试时，遵循这些原则：
