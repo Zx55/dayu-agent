@@ -414,6 +414,10 @@ Dayu 在 Agent 执行路径上需要固定三类对象：
 - `Host` internal success 的 answer 不会自动进入 reply outbox；必须先交回 `Service`，再由 `Service` 决定是否显式提交 delivery request。
 - 如果产品需要 reply reliable delivery，必须使用独立的 reply outbox 真源，而不是延长 pending turn 生命周期。
 
+CLI 的结果文件属于 `UI` 交付边界。Host 执行完成、最终答案写入文件、进程资源清理结束是三个不同事实，不能用“进程尚未退出”推断“答案尚未生成”。
+
+`prompt --output` 必须在服务事件流正常完成后原子交付完整答案并停止状态提示，再等待事件循环及默认线程池清理。仅观察到中途的 `final_answer` 事件不足以提交文件，后续流失败或取消不得覆盖已有结果。文件写入失败由 CLI 返回非零退出码，不改变 Host 已完成执行这一事实。该文件交付不自动提供 reply outbox 的重试或渠道回执能力。
+
 当前 reply outbox 的 `claim` 语义只保证“领取发送权”这一步是独占的；`ack / nack` 仍然是对 delivery record 的状态回写，而不是对某个领取者身份的校验。
 
 因此，如果后续需要更强的分布式 delivery worker 保证，例如防止 worker 崩溃后被其它 worker 接管期间出现旧 worker 误回写，就应在 reply outbox 真源上继续增强 `lease / owner token` 语义：
