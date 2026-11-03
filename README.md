@@ -181,7 +181,7 @@ ChatGPT token 保存在 `~/.config/dayu/auth/` 的受保护文件中，不写入
 
 ### 1.3 初始化工作区与配置
 
-安装后运行一次 `init`，交互式完成配置复制、模型供应商选择和 API Key 设置：
+安装后运行一次 `init`，交互式完成配置复制、模型供应商选择和认证设置：
 
 ```bash
 dayu-cli init
@@ -190,11 +190,11 @@ dayu-cli init
 `init` 会依次执行：
 
 1. 复制包内默认配置到 `./workspace/config/` ，复制包内默认写作模板到 `./workspace/assets/` 。
-2. 让你选择初始化模型方案（Mimo / DeepSeek / OpenAI / Anthropic / Gemini / 通义千问 / 本地 Ollama / 自定义 OpenAI 兼容 API）。选中 Mimo / DeepSeek / Google Gemini 后会进入二级菜单挑选具体型号：
+2. 让你选择初始化模型方案（Mimo / DeepSeek / OpenAI / Anthropic / Gemini / 通义千问 / ChatGPT 订阅 / 本地 Ollama / 自定义 OpenAI 兼容 API）。选中 Mimo / DeepSeek / Google Gemini 后会进入二级菜单挑选具体型号：
    - Mimo：Token Plan（默认）/ Token Plan SG / Pro 三档，三档各自独立 API Key
    - DeepSeek：Pro（默认）/ Flash 两档，共享 `DEEPSEEK_API_KEY`
    - Gemini：`gemini-2.5-flash`（默认）/ `gemini-2.5-pro` / `gemini-2.5-flash-lite` / `gemini-3.1-pro-preview` / `gemini-3.1-flash-lite-preview`
-3. 输入对应 API Key 并永久写入环境变量。
+3. API key 方案输入对应 Key 并永久写入环境变量；ChatGPT 订阅走浏览器登录与受保护凭据存储；本地 Ollama 配置模型和上下文上限，不要求 API Key。ChatGPT 的模型选择与重新登录方式见[账号登录说明](#chatgpt-账号登录)。
 4. 可选配置联网检索 API Key（TAVILY / SERPER / FMP）
 5. 自动检测 HuggingFace 官方 Hub 连通性：不可达时默认启用镜像加速，可达时默认跳过。可选配置 `HF_TOKEN` 提升下载稳定性。
 6. 自动配置 `transformers` / `huggingface_hub` / `tqdm` 输出降噪环境变量，避免下载进度打断终端状态栏。
