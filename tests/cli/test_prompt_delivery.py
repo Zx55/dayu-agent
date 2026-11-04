@@ -127,3 +127,74 @@ def test_prompt_delivers_before_default_executor_shutdown(
     assert observed == [("旧答案" if failed_stream or failed_write else "完整答案", True)]
     assert code == (2 if failed_stream or failed_write else 0)
     assert writes == ([] if failed_stream else ["完整答案"])
+
+
+@pytest.mark.parametrize("labeled", [False, True])
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize(
+    "events",
+    [
+        [AppEvent(AppEventType.ERROR, {"message": "模型调用失败"})],
+        [
+            AppEvent(AppEventType.FINAL_ANSWER, {"content": "不应交付"}),
+            AppEvent(AppEventType.ERROR, {"message": "服务收尾失败"}),
+        ],
+        [AppEvent(AppEventType.CANCELLED, {})],
+        [AppEvent(AppEventType.FINAL_ANSWER, {"content": " \n "})],
+        [],
+    ],
+)
+def test_prompt_output_rejects_failed_or_empty_turn(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    labeled: bool,
+    existing: bool,
+    events: list[AppEvent],
+) -> None:
+    """覆盖两种 prompt 的交付闸门。
+
+    Args:
+        tmp_path: 隔离输出路径。
+        capsys: 捕获交付回执。
+        labeled: 是否为可恢复会话。
+        existing: 输出文件是否预先存在。
+        events: 在 DONE 前发出的服务事件。
+    Returns:
+        无。
+    Raises:
+        AssertionError: 失败退出码、文件或回执语义不符。
+    """
+    destination = tmp_path / "answer.md"
+    if existing:
+        destination.write_text("旧答案", encoding="utf-8")
+
+    class Service:
+        """提供可正常迭代结束的失败事件流。"""
+
+        async def stream(self) -> AsyncIterator[AppEvent]:
+            """无参数，返回测试事件流，无异常。"""
+            for event in events:
+                yield event
+            yield AppEvent(AppEventType.DONE, {})
+
+        async def submit(self, request: PromptRequest) -> PromptSubmission:
+            """参数为单轮请求，返回事件流，无异常。"""
+            return PromptSubmission(session_id="fixture", event_stream=self.stream())
+
+        async def submit_turn(self, request: ChatTurnRequest) -> ChatTurnSubmission:
+            """参数为会话请求，返回事件流，无异常。"""
+            return ChatTurnSubmission(session_id="fixture", event_stream=self.stream())
+
+    if labeled:
+        code = ui.conversation_prompt(
+            cast(ChatServiceProtocol, Service()), "问题", label="fixture", session_id="fixture",
+            scene_name="prompt_mt", output_path=destination,
+        )
+    else:
+        code = ui.prompt(cast(PromptServiceProtocol, Service()), "问题", output_path=destination)
+    assert code == 2
+    assert "Markdown 已保存" not in capsys.readouterr().out
+    if existing:
+        assert destination.read_text(encoding="utf-8") == "旧答案"
+    else:
+        assert not destination.exists()

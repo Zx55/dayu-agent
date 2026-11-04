@@ -172,6 +172,7 @@ class _RenderState:
     reasoning_line_open: bool = False
     line_open: bool = False
     final_content: str = ""
+    failed: bool = False
     filtered: bool = False
     tool_calls_seen: int = 0
     _pending_content_delta: str | None = None
@@ -405,6 +406,7 @@ def _render_stream_event(event: Any, state: _RenderState) -> None:
         return
 
     if event_type == AppEventType.ERROR.value:
+        state.failed = True
         if isinstance(payload, dict):
             message = str(payload.get("message", payload))
         else:
@@ -413,6 +415,7 @@ def _render_stream_event(event: Any, state: _RenderState) -> None:
         return
 
     if event_type == AppEventType.CANCELLED.value:
+        state.failed = True
         _render_warning_or_error(state, _format_cancelled_message(payload))
         return
 
@@ -773,6 +776,7 @@ async def _consume_and_deliver(
         原始事件消费结果。
     Raises:
         OSError: 文件写入失败。
+        RuntimeError: 请求输出文件但本轮失败、取消或没有有效最终答案。
         Exception: 事件流异常原样传播，不交付部分结果。
     """
     try:
@@ -780,6 +784,10 @@ async def _consume_and_deliver(
     finally:
         _finish_rendering(state)
     if output_path is not None:
+        if state.failed:
+            raise RuntimeError("本轮执行失败或已取消，无法交付 Markdown")
+        if not state.final_content.strip():
+            raise RuntimeError("本轮没有有效最终答案，无法交付 Markdown")
         written_path = write_prompt_markdown(output_path, state.final_content)
         print(f"Markdown 已保存: {written_path}")
     return result
