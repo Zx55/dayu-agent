@@ -2,7 +2,7 @@
 
 本文档只说明测试分层、运行方式和维护规则。具体业务背景与代码架构请看各包 README。
 
-`tests/cli/test_prompt_delivery.py` 使用真实默认线程池与完整 CLI 事件消费，验证 one-shot 和 label 在后台线程清理前停止状态、原子交付完整答案。服务流失败或文件写入失败必须保留旧文件，正常完成只能写入一次。
+`tests/cli/test_prompt_delivery.py` 使用真实默认线程池与完整 CLI 事件消费，验证 one-shot 和 label 在后台线程清理前停止状态、原子交付完整答案。流异常、错误或取消事件、缺少有效最终答案及写入失败均返回非零退出码并保留旧文件。事件形式的失败还覆盖目标不存在的情形，要求无文件和成功回执。
 
 `tests/engine/test_web_document_backend.py` 使用真实 spawn 子进程验证网页文档转换的结果发布、大结果、崩溃、超时、取消及忽略 SIGTERM 后的回收。转换后必须没有残留子进程和临时目录，异步工具超时不得拖住默认线程池关闭。Docling 内容质量由 `test_web_fetch_docling_integration.py` 的真实 PDF 路径验证。
 
