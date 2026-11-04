@@ -512,6 +512,7 @@ Fins 相关改动时，至少同步更新：
 - 完整初始化集成同时覆盖深度场景和快速场景，目录将 `gpt-6.1-sol` 放在第二项，输入全用默认值，最终 HTTP payload 必须分别为 high 和 low，证明 scene/Host 实际消费了两个模板。
 - 同一初始化集成还覆盖 `prompt`、`prompt_mt`、`interactive` 显式切换两个 alias 到真实 Runner HTTP 请求。重复定向初始化不得产生重复候选或改写既有结果，内部场景不得额外获得另一角色的 alias，已有模型候选必须保留。
 - `tests/engine/test_responses_runner.py` 用本地 HTTP/SSE 服务验证多轮工具调用、参数完整性、reasoning 回传、取消和认证错误终止。上下文超限须实际触发 Agent 压缩后重试，文本截断须带 reasoning 状态续写，过滤终态不得续写，incomplete 工具请求即使参数完整也不得执行。刷新 HTML 503 后成功的用例验证认证到 Runner 的有限重试链路。
+- SSE 回归同时覆盖终态携带完整输出、终态为空但条目在流中完成两种响应，验证文本、按索引还原的 reasoning、工具只执行一次及后续结果回填。流中断、非成功终态、条目缺失或重复完成均不得执行暂存工具。
 - 原工具执行测试迁到共享 `ToolBatchExecutor` 边界。既有 OpenAI Runner 请求、Agent 治理和 Host 测试继续作为回归。
 
 以上自动化测试不使用真实 ChatGPT 账号。浏览器授权、账号推理权限和真实 labeled 研究需要单独人工验收，不能以 mock 通过替代。

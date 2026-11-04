@@ -189,6 +189,7 @@ class AsyncResponsesRunner:
         request_refresh = False
         for attempt in range(self.max_retries + 2):
             self._check_cancelled()
+            staged_output: dict[int, dict[str, JsonValue] | None] = {}
             try:
                 credential = await self._wait(self.credentials.acquire(refresh=request_refresh))
                 request_refresh = False
@@ -235,10 +236,29 @@ class AsyncResponsesRunner:
                     if kind == "response.output_text.delta" and isinstance(event.get("delta"), str):
                         emitted = True
                         yield content_delta(str(event["delta"]), **trace)
+                    elif kind in {"response.output_item.added", "response.output_item.done"}:
+                        index, item = event.get("output_index"), event.get("item")
+                        if not isinstance(index, int) or isinstance(index, bool) or index < 0 or not isinstance(item, dict):
+                            raise ValueError("Responses 输出条目位置或结构无效")
+                        if kind == "response.output_item.added":
+                            staged_output.setdefault(index, None)
+                        elif staged_output.get(index) is not None:
+                            raise ValueError("Responses 输出条目重复完成")
+                        else:
+                            staged_output[index] = item
                     elif kind == "response.completed":
                         value = event.get("response")
                         if not isinstance(value, dict) or value.get("status") != "completed":
                             raise ValueError("Responses 完成终态无效")
+                        # 部分账号响应只在 SSE 条目完成事件中携带输出。
+                        # 仅在成功终态补齐有序、完整的条目，再走统一输出校验。
+                        if value.get("output") == [] and staged_output:
+                            recovered: list[JsonValue] = []
+                            for expected, (index, item) in enumerate(sorted(staged_output.items())):
+                                if index != expected or item is None or item.get("status") not in (None, "completed"):
+                                    raise ValueError("Responses 完成条目缺失或未完成")
+                                recovered.append(item)
+                            value = {**value, "output": recovered}
                         completed = value
                         break
                     elif kind == "response.incomplete":
