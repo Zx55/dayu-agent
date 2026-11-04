@@ -121,6 +121,7 @@ class AsyncRunner(Protocol):
 
 Responses 实现：
 - `AsyncResponsesRunner` 调用公共 HTTP/SSE Responses 接口，每次发送完整客户端历史。只在 `response.completed` 且输出校验成功后执行工具，不以部分参数或流断开作为执行依据。
+- 成功终态的 `output` 为空数组时，Runner 可以按 `output_index` 恢复完整的 `response.output_item.done` 条目，再沿用统一的输出校验与续接逻辑。缺失、重复完成或未完成的条目会拒绝恢复，工具仍只在成功终态后执行。
 - 上下文超限错误归一为 `context_overflow`，交由 Agent 触发压缩。`response.incomplete` 的 `max_output_tokens` / `max_messages` 映射为截断续写，保留对应 continuation；`content_filter` 映射为过滤终态，不续写。其余 incomplete 原因报错，任何 incomplete 响应中的工具请求均不执行。
 - `responses_codec` 负责消息与工具 namespace 转换，`responses_stream_parser` 负责 SSE framing。模型不拥有 Dayu 工具的执行权。
 - `ToolBatchExecutor` 被两个 Runner 共用，负责工具上下文、并发、超时、取消与工具事件。`AsyncAgent` 的结果回填和跨轮治理保持原职责。

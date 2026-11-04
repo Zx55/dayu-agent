@@ -146,14 +146,28 @@ async def server(
         await app_runner.cleanup()
 
 
+def done_item(index: int, item: JsonValue) -> dict[str, JsonValue]:
+    """构造已完成输出事件。参数为输出位置和条目，返回 SSE 对象，无异常。"""
+    return {"type": "response.output_item.done", "output_index": index, "item": item}
+
+
 @pytest.mark.asyncio
-async def test_agent_loop_preserves_reasoning_and_executes_once(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("terminal_has_items", [True, False])
+async def test_agent_loop_preserves_reasoning_and_executes_once(
+    monkeypatch: pytest.MonkeyPatch, terminal_has_items: bool
+) -> None:
     reasoning: JsonValue = {"type": "reasoning", "id": "rs1", "summary": [], "encrypted_content": "opaque-state"}
     tools = Tools()
-    async with server(
-        [[complete([reasoning, function_item()])], [complete([function_item("c2", 2)])], [complete([text_item()])]],
-        monkeypatch,
-    ) as requests:
+    batches = [
+        [complete([reasoning, function_item()])],
+        [complete([function_item("c2", 2)])],
+        [complete([text_item()])],
+    ] if terminal_has_items else [
+        [done_item(1, function_item()), done_item(0, reasoning), complete([])],
+        [done_item(0, function_item("c2", 2)), complete([])],
+        [{"type": "response.output_text.delta", "delta": "答案"}, done_item(0, text_item()), complete([])],
+    ]
+    async with server(batches, monkeypatch) as requests:
         runner = AsyncResponsesRunner(model="fixture", credentials=Credentials())
         agent = AsyncAgent(
             runner=runner, tool_executor=cast(ToolExecutor, tools), running_config=AgentRunningConfig(max_iterations=5)
@@ -165,6 +179,10 @@ async def test_agent_loop_preserves_reasoning_and_executes_once(monkeypatch: pyt
     encoded = json.dumps(requests[2], ensure_ascii=False)
     assert encoded.count("opaque-state") == 1
     assert encoded.count('"call_id": "c1"') == 2
+    request_items = requests[2]["input"]
+    assert isinstance(request_items, list)
+    output_types = [item.get("type") for item in request_items if isinstance(item, dict)]
+    assert output_types.index("reasoning") < output_types.index("function_call")
     assert '"function_call_output"' in encoded
     assert all(request["store"] is False and request["stream"] is True for request in requests)
     assert all("temperature" not in request and "previous_response_id" not in request for request in requests)
@@ -178,6 +196,21 @@ async def test_agent_loop_preserves_reasoning_and_executes_once(monkeypatch: pyt
         [],
         [{"type": "response.failed", "response": {"error": {"code": "subscription_sharing_usage_limit_exceeded"}}}],
         [complete([{"type": "function_call", "call_id": "bad", "name": "echo", "arguments": "{"}])],
+        [done_item(0, function_item())],
+        [
+            done_item(0, function_item()),
+            {
+                "type": "response.incomplete",
+                "response": {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}, "output": []},
+            },
+        ],
+        [done_item(1, function_item()), complete([])],
+        [done_item(0, function_item()), done_item(0, function_item("other")), complete([])],
+        [
+            done_item(0, function_item()),
+            {"type": "response.output_item.added", "output_index": 1, "item": function_item("pending")},
+            complete([]),
+        ],
     ],
 )
 async def test_unfinished_or_invalid_output_never_executes_tools(
